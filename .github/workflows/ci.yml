@@ -1,0 +1,22 @@
+name: checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.lock
+      - run: python -m pip check
+      - run: python -m ruff check apps/api scripts
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '26.13.1'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci --include=optional && npm run build
+        working-directory: apps/web
