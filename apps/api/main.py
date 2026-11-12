@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
@@ -10,8 +12,19 @@ from .db import Membership, Project, session_db
 from .documents import router as documents_router
 from .limits import BodySizeLimit
 from .settings import settings
+from .worker import start as start_worker
 
-app = FastAPI(title='Транскоминжиниринг', version='0.1.0')
+
+@asynccontextmanager
+async def lifespan(app):
+    worker = start_worker() if settings.worker_enabled else None
+    yield
+    if worker:
+        worker[0].set()
+        worker[1].join(timeout=5)
+
+
+app = FastAPI(title='Транскоминжиниринг', version='0.1.0', lifespan=lifespan)
 app.add_middleware(BodySizeLimit)
 app.include_router(auth_router)
 app.include_router(documents_router)

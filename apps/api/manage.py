@@ -24,7 +24,7 @@ def protect_directory(path: Path):
 def seed(session, save_credentials=True):
     if session.scalar(select(db.User.id).limit(1)):
         return []
-    project = db.Project(title='Газопровод Ревенево', description='Пилотный архив проектирования')
+    project = db.Project(title='Газопровод Ренево', description='Пилотный архив проектирования')
     session.add(project)
     session.flush()
     accounts = []

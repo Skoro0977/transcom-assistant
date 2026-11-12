@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     database_url: str = 'sqlite:///' + str(DATA / 'transcom.db').replace('\\', '/')
     session_hours: int = Field(default=12, ge=1, le=168)
     cookie_secure: bool = False
+    worker_enabled: bool = True
     allowed_origins: str = 'http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:5173,http://localhost:5173'
 
 

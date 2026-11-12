@@ -229,7 +229,22 @@ def detail(document_id: str, who: Identity = Depends(identity), db: Session = De
     document = accessible_document(document_id, db, who)
     versions = db.scalars(select(DocumentVersion).where(DocumentVersion.document_id == document_id)
                          .order_by(DocumentVersion.number.desc())).all()
-    return {'id': document.id, 'title': document.title, 'version': document.version,
+    from .worker import AttachmentLink
+    links = db.execute(select(AttachmentLink.parent_version_id, AttachmentLink.child_version_id)
+                       .join(DocumentVersion, DocumentVersion.id == AttachmentLink.parent_version_id)
+                       .where(DocumentVersion.project_id == document.project_id,
+                              AttachmentLink.parent_version_id.in_([v.id for v in versions]))).all()
+    attached = []
+    for parent, child_id in links:
+        child = db.get(DocumentVersion, child_id)
+        child_doc = db.get(Document, child.document_id)
+        if child_doc.lifecycle != 'purged' and child.project_id == document.project_id:
+            attached.append({'parent_version_id': parent, 'document_id': child.document_id,
+                             'version_id': child.id, 'filename': child.filename})
+    return {'id': document.id, 'title': document.title, 'version': document.version, 'attachments': attached,
+            'origins': [{'channel': o.channel, 'source_name': o.source_name, 'received_at': o.received_at,
+                         'version_id': o.version_id} for o in db.scalars(select(Occurrence).where(
+                             Occurrence.version_id.in_([v.id for v in versions])))],
             'versions': [{'id': v.id, 'number': v.number, 'filename': v.filename, 'status': v.status,
                           'warning': v.warning, 'text': v.text[:200000], 'metadata': v.metadata_json,
                           'created_at': v.created_at} for v in versions]}

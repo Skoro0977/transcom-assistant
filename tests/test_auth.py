@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,11 +9,12 @@ from sqlalchemy.orm import sessionmaker
 from apps.api import db, documents
 from apps.api.main import app
 from apps.api.manage import seed
-from apps.api.settings import validate_database_location
+from apps.api.settings import settings, validate_database_location
 
 
 @pytest.fixture
 def isolated(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, 'worker_enabled', False)
     engine = create_engine('sqlite:///' + str(tmp_path / 'auth.db'),
                            connect_args={'check_same_thread': False})
 
@@ -93,8 +95,40 @@ def test_upload_duplicates_versions_and_private_files(isolated, tmp_path, monkey
     assert client.get('/api/documents/' + first['id'] + '/content').status_code == 404
 
 
-def test_chunked_body_is_limited_before_parsing():
+def test_chunked_body_is_limited_before_parsing(monkeypatch):
+    monkeypatch.setattr(settings, 'worker_enabled', False)
     with TestClient(app, base_url='http://127.0.0.1:8000') as client:
         chunks = iter([b'{"username":"', b'x' * (1024 * 1024), b'","password":"x"}'])
         result = client.post('/api/auth/login', content=chunks, headers={'Content-Type': 'application/json'})
         assert result.status_code == 413
+
+
+def test_mail_attachments_and_uncached_formulas(tmp_path):
+    from email.message import EmailMessage
+
+    from openpyxl import Workbook
+
+    from apps.api.parse_file import parse
+    mail = EmailMessage()
+    mail['Subject'] = 'Проверка основания'
+    mail.set_content('Новый срок 15 декабря.\nFrom: old@example.org\nПредыдущая переписка')
+    mail.add_attachment(b'original', maintype='application', subtype='octet-stream', filename='../source.txt')
+    source = tmp_path / 'letter.eml'
+    source.write_bytes(mail.as_bytes())
+    result = parse(source, tmp_path)
+    assert any(s['quoted'] for s in result['segments'])
+    assert result['attachments'][0]['name'] == 'source.txt'
+    assert Path(result['attachments'][0]['path']).read_bytes() == b'original'
+    sheet = Workbook()
+    sheet.active['A1'] = '=1+1'
+    sheet.active['B2'] = 'Не в первой ячейке'
+    book = tmp_path / 'formula.xlsx'
+    sheet.save(book)
+    sheet.close()
+    result = parse(book, tmp_path)
+    assert result['status'] == 'needs_preparation'
+    assert result['metadata']['formulas_without_cache'] == 1
+    mail = EmailMessage()
+    mail.set_content('From: old@example.org\nТолько пересланная переписка')
+    source.write_bytes(mail.as_bytes())
+    assert all(s['quoted'] for s in parse(source, tmp_path)['segments'] if s['locator'] != 'Тема письма')
