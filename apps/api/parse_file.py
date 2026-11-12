@@ -2,10 +2,12 @@
 import email
 import json
 import re
+import subprocess
 import sys
 import zipfile
 from email import policy
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 MAX_TEXT = 2_000_000
@@ -13,6 +15,7 @@ MAX_EXPANDED = 200 * 1024 * 1024
 
 
 def parse(path: Path, output: Path):
+    started = monotonic()
     suffix = path.suffix.lower()
     segments, metadata, attachments, warnings = [], {}, [], []
     length = 0
@@ -77,7 +80,32 @@ def parse(path: Path, output: Path):
                 scans.append(number)
         metadata.update(pages=len(reader.pages), scan_pages=scans)
         if scans:
-            warnings.append(f'Нужна проверка текстового слоя/OCR: {len(scans)} страниц')
+            from .local_tools import ocr_image, pdf_image
+            recognized = []
+            for number in scans[:20]:
+                remaining = 180 - (monotonic() - started)
+                if remaining < 5:
+                    warnings.append('Достигнут общий бюджет OCR, сохранен частичный текст')
+                    break
+                try:
+                    image = pdf_image(path, number, output)
+                    text, confidence = ocr_image(image, output, timeout=min(45, remaining))
+                    add(f'PDF OCR, страница {number}, уверенность {confidence:.0f}%', text)
+                    if text.strip():
+                        recognized.append(number)
+                    if confidence < 65:
+                        warnings.append(f'OCR страницы {number} требует сверки, уверенность {confidence:.0f}%')
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    warnings.append(f'OCR страницы {number} не выполнен, доступен оригинал')
+            metadata['ocr_pages'] = recognized
+            metadata['ocr_review_required'] = bool(recognized)
+            metadata['scan_pages'] = [n for n in scans if n not in recognized]
+            if metadata['scan_pages']:
+                warnings.append(f'Осталось страниц без текста: {len(metadata["scan_pages"])}')
+    elif suffix == '.doc':
+        from .local_tools import legacy_word
+        add('DOC, текстовые блоки Word', legacy_word(path))
+        metadata['legacy_policy'] = 'Текстовые блоки Word97+, без выполнения полей, объектов и макросов; сложная верстка требует сверки'
     elif suffix == '.docx':
         from docx import Document
         from docx.table import Table
@@ -117,6 +145,20 @@ def parse(path: Path, output: Path):
         finally:
             workbook.close()
             formulas.close()
+    elif suffix == '.xls':
+        import xlrd
+        workbook = xlrd.open_workbook(path, on_demand=True)
+        try:
+            for sheet in workbook.sheets():
+                if sheet.nrows * sheet.ncols > 250000:
+                    warnings.append('Лист превышает предел извлечения ячеек')
+                    continue
+                for number in range(sheet.nrows):
+                    values = [f'{index + 1}: {cell.value}' for index, cell in enumerate(sheet.row(number)) if cell.ctype != xlrd.XL_CELL_EMPTY]
+                    add(f'XLS, лист {sheet.name}, строка {number + 1}', ' | '.join(values))
+            metadata['formula_policy'] = 'Только сохраненные значения XLS, формулы и макросы не выполняются'
+        finally:
+            workbook.release_resources()
     elif suffix == '.msg':
         import extract_msg
         message = extract_msg.openMsg(str(path))
@@ -172,6 +214,41 @@ def parse(path: Path, output: Path):
             from striprtf.striprtf import rtf_to_text
             text = rtf_to_text(text, encoding='cp1251', errors='replace')
         add('Текст файла', text)
+    elif suffix in {'.png', '.jpg', '.jpeg'}:
+        from .local_tools import ocr_image
+        text, confidence = ocr_image(path, output)
+        add(f'OCR изображения, уверенность {confidence:.0f}%', text)
+        metadata.update(ocr_confidence=confidence, ocr_review_required=True)
+        if confidence < 65:
+            warnings.append('Распознанный текст требует сверки с оригиналом')
+    elif suffix == '.kml':
+        from defusedxml.ElementTree import parse as xml_parse
+        root = xml_parse(path).getroot()
+        for number, place in enumerate(root.iter('{http://www.opengis.net/kml/2.2}Placemark'), 1):
+            values = [element.text for element in place.iter() if element.tag.rsplit('}', 1)[-1] in {'name', 'description'} and element.text]
+            add(f'KML, объект {number}', '\n'.join(values))
+        warnings.append('Извлечены подписи KML; геометрия и инженерные параметры не проверены')
+    elif suffix == '.dxf':
+        raw = path.read_bytes()
+        if raw.startswith(b'AutoCAD Binary DXF'):
+            raise ValueError('Binary DXF requires preparation')
+        try:
+            text = raw.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            text = raw.decode('cp1251', errors='replace')
+        lines, entity, values, number = text.splitlines(), '', [], 0
+        for index in range(0, len(lines) - 1, 2):
+            code, value = lines[index].strip(), lines[index + 1].strip()
+            if code == '0':
+                if values:
+                    number += 1
+                    add(f'DXF, подпись {number}', ''.join(values).replace('\\P', '\n'))
+                entity, values = value, []
+            elif entity in {'TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'} and code in {'1', '3'}:
+                values.append(value)
+        if values:
+            add(f'DXF, подпись {number + 1}', ''.join(values).replace('\\P', '\n'))
+        warnings.append('Извлечены только подписи DXF; геометрия, масштаб и инженерные параметры не проверены')
     else:
         warnings.append('Нужна отдельная подготовка/OCR или просмотр инженерного исходника')
     return {'segments': segments, 'metadata': metadata, 'attachments': attachments,

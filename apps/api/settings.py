@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     session_hours: int = Field(default=12, ge=1, le=168)
     cookie_secure: bool = False
     worker_enabled: bool = True
+    ocr_node: str = 'D:/CodexData/Runtimes/node/node-v26.13.1-win-x64/node.exe'
     gigachat_auth_key: SecretStr = SecretStr('')
     gigachat_scope: Literal['GIGACHAT_API_PERS', 'GIGACHAT_API_B2B', 'GIGACHAT_API_CORP'] = 'GIGACHAT_API_PERS'
     gigachat_model: str = 'GigaChat-3-Lightning'

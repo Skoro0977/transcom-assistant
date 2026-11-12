@@ -1,0 +1,10 @@
+{
+  "name": "transcom-local-ocr",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "tesseract.js": "7.0.0",
+    "@tesseract.js-data/rus": "1.0.0",
+    "@tesseract.js-data/eng": "1.0.0"
+  }
+}

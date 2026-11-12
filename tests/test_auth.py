@@ -764,3 +764,46 @@ def test_chat_changes_require_confirmation_and_reject_stale_provider_results(iso
         json={'expected_version': 3, 'token': ticket['token'], 'confirmation': 'УДАЛИТЬ'}).status_code == 200
     assert accept(pending).status_code == 409
     assert 'synthetic-private-evidence' not in client.get(root + '/proposals?status=rejected').text
+
+def test_legacy_word_bounds_and_local_ocr(tmp_path):
+    import struct
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    from apps.api.local_tools import word_pieces
+    from apps.api.parse_file import parse
+    word = bytearray(1024)
+    struct.pack_into('<HH', word, 0, 0xA5EC, 0xC1)
+    struct.pack_into('<H', word, 32, 14)
+    struct.pack_into('<H', word, 62, 22)
+    struct.pack_into('<H', word, 152, 93)
+    phrase = 'Срок 15 декабря 2026'
+    encoded = phrase.encode('utf-16-le')
+    word[512:512 + len(encoded)] = encoded
+    piece = struct.pack('<IIHIH', 0, len(phrase), 0, 512, 0)
+    clx = b'\x02' + struct.pack('<I', len(piece)) + piece
+    struct.pack_into('<II', word, 418, 0, len(clx))
+    assert word_pieces(word, clx) == phrase
+    bad = bytearray(clx)
+    struct.pack_into('<I', bad, 15, 0x3FFFFFFF)
+    with pytest.raises(ValueError):
+        word_pieces(word, bad)
+    image = Image.new('RGB', (1800, 400), 'white')
+    ImageDraw.Draw(image).text((50, 70), phrase, fill='black', font=ImageFont.truetype('C:/Windows/Fonts/arial.ttf', 64))
+    source = tmp_path / 'synthetic.png'
+    image.save(source)
+    result = parse(source, tmp_path)
+    assert result['metadata']['ocr_confidence'] > 80
+    assert '2026' in result['segments'][0]['text'] and result['metadata']['ocr_review_required']
+    pdf = tmp_path / 'scan.pdf'
+    image.save(pdf, resolution=150)
+    scanned = parse(pdf, tmp_path)
+    assert scanned['metadata']['ocr_pages'] == [1] and not scanned['metadata']['scan_pages']
+    assert '2026' in scanned['segments'][0]['text']
+    kml = tmp_path / 'labels.kml'
+    kml.write_text('<kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><name>Трасса</name></Placemark></kml>', encoding='utf-8')
+    assert parse(kml, tmp_path)['segments'][0]['text'] == 'Трасса'
+    kml.write_text('<!DOCTYPE kml [<!ENTITY leak SYSTEM "file:///C:/Windows/win.ini">]><kml>&leak;</kml>', encoding='utf-8')
+    from defusedxml.common import DefusedXmlException
+    with pytest.raises(DefusedXmlException):
+        parse(kml, tmp_path)

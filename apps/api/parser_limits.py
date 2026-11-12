@@ -31,7 +31,7 @@ def limit_memory():
     global _job_handle
     _job_handle = kernel.CreateJobObjectW(None, None)
     info = Extended()
-    info.basic.flags = 0x100  # JOB_OBJECT_LIMIT_PROCESS_MEMORY
+    info.basic.flags = 0x100 | 0x2000  # Per-process memory and kill children when parser exits.
     info.process_memory = limit
     if (not _job_handle or not kernel.SetInformationJobObject(_job_handle, 9, c.byref(info), c.sizeof(info))
             or not kernel.AssignProcessToJobObject(_job_handle, kernel.GetCurrentProcess())):

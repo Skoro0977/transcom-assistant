@@ -16,3 +16,5 @@ npm --prefix (Join-Path $projectPath 'apps\web') ci
 if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency install failed' }
 npm --prefix (Join-Path $projectPath 'apps\web') run build
 if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
+npm --prefix (Join-Path $projectPath 'tools\ocr') ci --ignore-scripts
+if ($LASTEXITCODE -ne 0) { throw 'Local OCR dependency install failed' }

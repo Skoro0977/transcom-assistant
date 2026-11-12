@@ -115,7 +115,7 @@ def process(job_id):
         with (temporary / 'parser.log').open('wb') as log:
             outcome = subprocess.run([sys.executable, '-B', '-m', 'apps.api.parse_file', str(source), str(temporary)],
                                      cwd=ROOT, env=environment, stdout=subprocess.DEVNULL, stderr=log,
-                                     timeout=90, check=False)
+                                     timeout=240, check=False)
         if outcome.returncode != 0:
             raise ValueError('Parser rejected file')
         result_path = temporary / 'result.json'
