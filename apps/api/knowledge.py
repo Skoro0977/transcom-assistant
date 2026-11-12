@@ -92,8 +92,15 @@ class PolicyData(FactData):
         return self
 
 
+class DocumentData(InputModel):
+    title: str = Field(min_length=1, max_length=240)
+    category: str = Field(min_length=1, max_length=200)
+    document_id: str = Field(min_length=32, max_length=32)
+    document_version: int = Field(ge=1)
+
+
 DATA_TYPES = {'requirement': FactData, 'stage': StageData, 'task': TaskData, 'event': EventData,
-              'risk': RiskData, 'policy': PolicyData}
+              'risk': RiskData, 'policy': PolicyData, 'document': DocumentData}
 
 
 class Record(db.Base):
@@ -158,10 +165,10 @@ class Audit(db.Base):
 
 
 class ProposalInput(InputModel):
-    kind: Literal['requirement', 'stage', 'task', 'event', 'risk', 'policy'] = 'requirement'
+    kind: Literal['requirement', 'stage', 'task', 'event', 'risk', 'policy', 'document'] = 'requirement'
     target_id: str | None = Field(default=None, max_length=32)
     base_version: int = Field(default=0, ge=0)
-    data: FactData | StageData | TaskData | EventData | RiskData | PolicyData
+    data: FactData | StageData | TaskData | EventData | RiskData | PolicyData | DocumentData
     conflict: bool = False
     note: str = Field(default='', max_length=4000)
 
@@ -189,6 +196,8 @@ def current(session, record):
 
 
 def validate_target(session, project_id, body):
+    if body.kind == 'document' and body.target_id:
+        raise HTTPException(422, 'У изменения документа цель указана в document_id')
     if body.target_id:
         target = session.get(Record, body.target_id)
         if not target or target.project_id != project_id or target.kind != body.kind:
@@ -201,6 +210,12 @@ def validate_target(session, project_id, body):
 
 
 def validate_links(session, project_id, kind, data, target_id=None):
+    if kind == 'document':
+        document = session.get(Document, data['document_id'])
+        if not document or document.project_id != project_id or document.lifecycle != 'active':
+            raise HTTPException(422, 'Активный документ недоступен в этом проекте')
+        if document.version != data['document_version']:
+            raise HTTPException(409, 'Документ уже изменился')
     if kind == 'policy' and session.scalar(select(Record.id).where(Record.project_id == project_id,
             Record.kind == 'policy', Record.id != (target_id or ''))):
         raise HTTPException(409, 'Правила уже существуют, предложите изменение их текущей редакции')
@@ -229,7 +244,7 @@ def validate_links(session, project_id, kind, data, target_id=None):
 
 def fingerprint_for(body, evidence, source_id, source_epoch=0):
     content = body.model_dump(mode='json', exclude={'evidence', 'expected_version'})
-    content['conflict'] = body.conflict or bool(body.target_id)
+    content['conflict'] = body.conflict or bool(body.target_id) or body.kind == 'document'
     parts = [content, evidence or [], source_id]
     if source_epoch:
         parts.append(source_epoch)
@@ -249,7 +264,7 @@ def add_proposal(session, project_id, author_id, body, evidence=None, source=Non
     proposal = Proposal(project_id=project_id, author_id=author_id, kind=body.kind, target_id=body.target_id,
         base_version=body.base_version, data=body.data.model_dump(mode='json'), evidence=evidence or [],
         source_version_id=source.id if source else None, source_document_version=document.version if document else 0,
-        conflict=body.conflict or bool(body.target_id), note=body.note, origin=origin, fingerprint=fingerprint)
+        conflict=body.conflict or bool(body.target_id) or body.kind == 'document', note=body.note, origin=origin, fingerprint=fingerprint)
     session.add(proposal)
     session.flush()
     return proposal
@@ -265,12 +280,29 @@ def decide(session, proposal, body, user_id):
     if changed.rowcount != 1:
         raise HTTPException(409, 'Решение уже принято другим участником')
     if body.decision == 'accepted':
+        for item in proposal.evidence:
+            if not item.get('version_id') or item.get('removed'):
+                continue
+            evidence_version = session.get(DocumentVersion, item['version_id'])
+            evidence_doc = session.get(Document, evidence_version.document_id) if evidence_version else None
+            if not evidence_doc or evidence_doc.project_id != proposal.project_id or evidence_doc.lifecycle == 'purged':
+                raise HTTPException(409, 'Основание окончательно удалено или недоступно')
         if proposal.source_version_id:
             source = session.get(DocumentVersion, proposal.source_version_id)
             document = session.get(Document, source.document_id)
             if document.lifecycle != 'active' or document.current_number != source.number:
                 raise HTTPException(409, 'Источник изменился или исключен из работы; нужен повторный анализ')
-        if proposal.target_id:
+        if proposal.kind == 'document':
+            data = DocumentData.model_validate(proposal.data).model_dump(mode='json')
+            validate_links(session, proposal.project_id, proposal.kind, data)
+            document = session.get(Document, data['document_id'])
+            before = {'title': document.title, 'category': document.category}
+            document.title, document.category = data['title'], data['category']
+            document.version += 1
+            session.add(Audit(project_id=proposal.project_id, user_id=user_id, action='document_metadata_changed',
+                entity_id=document.id, details={'before': before, 'after': {'title': document.title, 'category': document.category},
+                    'document_version': document.version, 'proposal_id': proposal.id}))
+        elif proposal.target_id:
             record = session.get(Record, proposal.target_id)
             if record.project_id != proposal.project_id or record.kind != proposal.kind:
                 raise HTTPException(409, 'Цель изменения недоступна')
@@ -285,14 +317,15 @@ def decide(session, proposal, body, user_id):
             session.flush()
             proposal.target_id = record.id
             number = 1
-        data = DATA_TYPES[proposal.kind].model_validate(proposal.data).model_dump(mode='json')
-        validate_links(session, proposal.project_id, proposal.kind, data, record.id)
-        revision = Revision(record_id=record.id, project_id=proposal.project_id, number=number,
-                            data=data, evidence=proposal.evidence, author_id=user_id, reason=body.reason)
-        session.add(revision)
-        session.flush()
-        from .search import index_revision
-        index_revision(session, revision)
+        if proposal.kind != 'document':
+            data = DATA_TYPES[proposal.kind].model_validate(proposal.data).model_dump(mode='json')
+            validate_links(session, proposal.project_id, proposal.kind, data, record.id)
+            revision = Revision(record_id=record.id, project_id=proposal.project_id, number=number,
+                                data=data, evidence=proposal.evidence, author_id=user_id, reason=body.reason)
+            session.add(revision)
+            session.flush()
+            from .search import index_revision
+            index_revision(session, revision)
     session.add(Audit(project_id=proposal.project_id, user_id=user_id, action='proposal_' + body.decision,
         entity_id=proposal.id, details={'target_id': proposal.target_id, 'base_version': proposal.base_version}))
 
@@ -324,7 +357,7 @@ def edit_proposal(proposal_id: str, body: ProposalEdit, who: Identity = Depends(
         raise HTTPException(409, 'Такое предложение уже существует в этом проекте')
     changed = session.execute(update(Proposal).where(Proposal.id == proposal_id, Proposal.status == 'pending',
         Proposal.version == body.expected_version).values(data=body.data.model_dump(mode='json'),
-        target_id=body.target_id, base_version=body.base_version, conflict=body.conflict or bool(body.target_id),
+        target_id=body.target_id, base_version=body.base_version, conflict=body.conflict or bool(body.target_id) or body.kind == 'document',
         note=body.note, fingerprint=fingerprint, version=body.expected_version + 1))
     if changed.rowcount != 1:
         raise HTTPException(409, 'Предложение уже изменилось')

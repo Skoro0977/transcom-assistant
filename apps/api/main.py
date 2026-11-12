@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .assistant import router as assistant_router
 from .auth import Identity, identity, project_access, public_user
 from .auth import router as auth_router
+from .changes import router as changes_router
 from .contracts import ProjectInput
 from .db import Membership, Project, session_db
 from .documents import Document, DocumentVersion
@@ -54,6 +55,7 @@ app.include_router(planning_router)
 app.include_router(risks_router)
 app.include_router(assistant_router)
 app.include_router(sources_router)
+app.include_router(changes_router)
 
 
 @app.middleware('http')

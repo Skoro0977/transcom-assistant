@@ -706,3 +706,61 @@ def test_sources_project_folders_reversions_and_readonly_mail_cursors(isolated, 
         session.commit()
         other_id = other.id
     assert client.get('/api/projects/' + other_id + '/sources').status_code == 404
+
+def test_chat_changes_require_confirmation_and_reject_stale_provider_results(isolated, tmp_path, monkeypatch):
+    from apps.api import changes
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    root = '/api/projects/' + project
+    url = root + '/chat/changes'
+    def request(**values):
+        return client.post(url, headers=headers, json={'kind': 'requirement', 'text': 'Уточнить срок', **values})
+    draft = request(patch={'title': 'Техническое условие', 'due_date': '2026-12-01'}).json()['proposal']
+    assert not client.get(root + '/records').json()
+    def accept(p):
+        return client.post('/api/proposals/' + p['id'] + '/decision', headers=headers,
+            json={'decision': 'accepted', 'expected_version': p['version']})
+    assert accept(draft).status_code == 200
+    record = client.get(root + '/records').json()[0]
+    identity = {'target_id': record['id'], 'expected_version': 1}
+    first = request(**identity, patch={'due_date': '2026-12-02'}).json()['proposal']
+    second = request(**identity, patch={'owner': 'Руководитель'}).json()['proposal']
+    assert accept(first).status_code == 200
+    assert accept(second).status_code == 409
+    assert request(**identity, patch={'due_date': '2026-12-03'}).status_code == 409
+    assert request(target_id=record['id'], expected_version=2, patch={'project_id': 'forbidden'}).status_code == 422
+    def stale_ai(*args, **kwargs):
+        fresh = request(target_id=record['id'], expected_version=2, patch={'owner': 'Другой участник'}).json()['proposal']
+        assert accept(fresh).status_code == 200
+        return '{"patch":{"due_date":"2026-12-04"},"clarification":""}'
+    monkeypatch.setattr(changes.giga, 'chat', stale_ai)
+    assert request(target_id=record['id'], expected_version=2, use_ai=True).status_code == 409
+    document = client.post(root + '/documents', files={'file': ('original.txt', b'Unchanged original')}, headers=headers).json()
+    proposal = request(kind='document', target_id=document['id'], expected_version=1,
+        patch={'title': 'Новое название', 'category': 'ТУ'}).json()['proposal']
+    assert accept(proposal).status_code == 200
+    assert client.get('/api/documents/' + document['id']).json()['category'] == 'ТУ'
+    assert client.get('/api/documents/' + document['id'] + '/content').content == b'Unchanged original'
+    assert all(r['kind'] != 'document' for r in client.get(root + '/records').json())
+    from sqlalchemy import select
+
+    from apps.api.knowledge import Revision
+    with db.SessionLocal() as session:
+        revision = session.scalar(select(Revision).where(Revision.record_id == record['id'], Revision.number == 3))
+        revision.evidence = [{'version_id': document['version_id'], 'document_id': document['id'],
+                              'quote': 'synthetic-private-evidence', 'locator': 'fixture'}]
+        session.commit()
+    pending = request(target_id=record['id'], expected_version=3, patch={'owner': 'Следующий'}).json()['proposal']
+    assert client.post('/api/documents/' + document['id'] + '/archive', headers=headers,
+        json={'expected_version': 2, 'state': 'archived'}).status_code == 200
+    ticket = client.post('/api/documents/' + document['id'] + '/purge-challenge', headers=headers,
+        json={'expected_version': 3}).json()
+    assert client.post('/api/documents/' + document['id'] + '/purge', headers=headers,
+        json={'expected_version': 3, 'token': ticket['token'], 'confirmation': 'УДАЛИТЬ'}).status_code == 200
+    assert accept(pending).status_code == 409
+    assert 'synthetic-private-evidence' not in client.get(root + '/proposals?status=rejected').text

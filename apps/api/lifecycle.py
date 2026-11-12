@@ -84,9 +84,11 @@ def edit_metadata(document_id: str, body: DocumentMetadata, who: Identity = Depe
     project_access(document.project_id, session, who, 'edit')
     if document.version != body.expected_version:
         raise HTTPException(409, 'Документ уже изменился')
+    before = {'title': document.title, 'category': document.category}
     document.title, document.category, document.version = body.title, body.category, document.version + 1
     session.add(Audit(project_id=document.project_id, user_id=who.user.id, action='document_metadata_changed',
-                      entity_id=document.id))
+                      entity_id=document.id, details={'before': before,
+                        'after': {'title': document.title, 'category': document.category}, 'document_version': document.version}))
     session.commit()
     return {'version': document.version}
 
@@ -197,12 +199,14 @@ def purge(document_id: str, body: PurgeInput, who: Identity = Depends(identity),
     from .documents import Occurrence
     for origin in session.scalars(select(Occurrence).where(Occurrence.version_id.in_(ids))):
         origin.source_name, origin.external_id = 'Удаленный источник', digest(origin.external_id)
-    for proposal in session.scalars(select(Proposal).where(Proposal.source_version_id.in_(ids))):
-        proposal.data = FactData(title='Источник удален').model_dump(mode='json')
-        proposal.evidence, proposal.note = [], 'Источник окончательно удален'
-        proposal.version += 1
-        if proposal.status == 'pending':
-            proposal.status = 'rejected'
+    for proposal in session.scalars(select(Proposal).where(Proposal.project_id == document.project_id)):
+        if (proposal.source_version_id in ids or any(e.get('version_id') in ids for e in proposal.evidence)
+                or (proposal.kind == 'document' and proposal.data.get('document_id') == document_id)):
+            proposal.data = FactData(title='Источник удален').model_dump(mode='json')
+            proposal.evidence, proposal.note = [], 'Источник окончательно удален'
+            proposal.version += 1
+            if proposal.status == 'pending':
+                proposal.status = 'rejected'
     for revision in session.scalars(select(Revision).where(Revision.project_id == document.project_id)):
         if any(e.get('version_id') in ids for e in revision.evidence):
             revision.evidence = [dict(e, quote='', locator='Удаленный источник', removed=True)

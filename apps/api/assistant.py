@@ -14,7 +14,7 @@ from .auth import Identity, identity, project_access
 from .contracts import InputModel
 from .documents import Document, DocumentVersion, Occurrence
 from .gigachat import ProviderError, giga
-from .knowledge import Proposal, Record, Revision
+from .knowledge import Audit, Proposal, Record, Revision
 from .planning import accepted_records
 from .risks import MOSCOW, policy
 from .search import Chunk, retrieve, source_date
@@ -197,6 +197,21 @@ def build_summary(session, project_id, start=None, end=None, basis='registered',
                 'author': session.get(db.User, revision.author_id).username, 'reason': revision.reason,
                 'changes': {key: {'before': before.get(key), 'after': value} for key, value in revision.data.items()
                             if before.get(key) != value}})
+    for event in session.scalars(select(Audit).where(Audit.project_id == project_id,
+            Audit.action == 'document_metadata_changed')):
+        proposal = session.get(Proposal, event.details.get('proposal_id')) if event.details.get('proposal_id') else None
+        registered_at = proposal.created_at if proposal else event.created_at
+        dated = None if basis == 'source' else registered_at if basis == 'registered' else event.created_at
+        if period_match(dated, start, end):
+            values = event.details.get('after', {})
+            if values:
+                changes.append({'record_id': event.entity_id, 'kind': 'document',
+                    'number': event.details.get('document_version', 0), 'data': values, 'evidence': [],
+                    'created_at': event.created_at, 'registered_at': registered_at,
+                    'author': session.get(db.User, event.user_id).username, 'reason': 'Изменение карточки документа',
+                    'changes': {key: {'before': event.details.get('before', {}).get(key), 'after': value}
+                                for key, value in values.items() if event.details.get('before', {}).get(key) != value}})
+    changes.sort(key=lambda row: (row['created_at'], row['record_id']))
     proposals = []
     for row in session.scalars(select(Proposal).where(Proposal.project_id == project_id)):
         dated = row.data.get('source_date') if basis == 'source' else row.decided_at if basis == 'confirmed' else row.created_at
