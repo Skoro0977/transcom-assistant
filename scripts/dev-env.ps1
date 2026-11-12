@@ -1,4 +1,5 @@
-$taskRoot = 'D:\CodexData\Projects\transcom-assistant'
+$taskRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $taskRoot.StartsWith('D:\', [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Project must stay on D' }
 $tempRoot = 'D:\CodexData\Temp\transcom-build'
 $cacheRoot = 'D:\CodexData\Caches\transcom'
 foreach ($folder in @($tempRoot, $cacheRoot)) {
