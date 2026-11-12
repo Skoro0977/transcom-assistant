@@ -2,6 +2,7 @@ import hashlib
 import mimetypes
 import re
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -20,7 +21,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .auth import Identity, identity, project_access
 from .contracts import InputModel
-from .db import Base, session_db, uid, utcnow
+from .db import Base, session_db, uid, utcnow, write_lock
 from .settings import DATA
 
 router = APIRouter(tags=['documents'])
@@ -111,14 +112,24 @@ def blob_path(key: str):
 
 
 def ingest(db: Session, project_id: str, user_id: str, temporary: Path, filename: str,
-           channel='upload', external_id=None, source_name=None, document_id=None, expected_version=None):
+           channel='upload', external_id=None, source_name=None, document_id=None, expected_version=None,
+           parent_version_id=None):
     filename = filename_only(filename)
     if temporary.stat().st_size > MAX_BYTES:
         raise HTTPException(413, 'Файл превышает ограничение 100 МиБ')
     with temporary.open('rb') as stream:
         checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
-    if db.get_bind().dialect.name == 'sqlite':
-        db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+    write_lock(db)
+    if parent_version_id:
+        parent = db.get(DocumentVersion, parent_version_id)
+        if not parent or parent.project_id != project_id or db.get(Document, parent.document_id).lifecycle != 'active':
+            raise HTTPException(409, 'Письмо-источник больше не активно')
+    from .lifecycle import PurgedContent
+    if db.scalar(select(PurgedContent).where(PurgedContent.project_id == project_id, PurgedContent.sha256 == checksum)):
+        if channel == 'upload':
+            raise HTTPException(409, 'Этот файл был окончательно удален. Повторное поступление тех же байтов заблокировано')
+        return {'id': None, 'version_id': None, 'number': 0, 'duplicate': False,
+                'suppressed': True, 'status': 'suppressed', 'lifecycle': 'purged'}
     document = db.get(Document, document_id) if document_id else None
     if document_id and (not document or document.project_id != project_id or document.lifecycle != 'active'):
         raise HTTPException(404, 'Активный документ не найден')
@@ -169,6 +180,11 @@ def ingest(db: Session, project_id: str, user_id: str, temporary: Path, filename
                               external_id=origin_id, source_name=source_name or filename))
         elif occurrence.version_id != version.id:
             raise HTTPException(409, 'Идентификатор источника уже связан с другим содержимым')
+        if parent_version_id and parent_version_id != version.id:
+            from .worker import AttachmentLink
+            if db.scalar(select(AttachmentLink).where(AttachmentLink.parent_version_id == parent_version_id,
+                                                      AttachmentLink.child_version_id == version.id)) is None:
+                db.add(AttachmentLink(parent_version_id=parent_version_id, child_version_id=version.id))
         db.commit()
         return {'id': document.id, 'version_id': version.id, 'number': version.number,
                 'duplicate': existing is not None, 'status': version.status, 'lifecycle': document.lifecycle}
@@ -210,7 +226,7 @@ async def upload(project_id: str, file: UploadFile, document_id: str | None = No
 
 
 @router.get('/api/projects/{project_id}/documents')
-def documents(project_id: str, lifecycle: str = 'active', limit: int = Query(default=100, ge=1, le=200),
+def documents(project_id: str, lifecycle: Literal['active', 'archived'] = 'active', limit: int = Query(default=100, ge=1, le=200),
               offset: int = Query(default=0, ge=0), who: Identity = Depends(identity),
               db: Session = Depends(session_db)):
     project_access(project_id, db, who)
@@ -244,7 +260,8 @@ def detail(document_id: str, who: Identity = Depends(identity), db: Session = De
         if child_doc.lifecycle != 'purged' and child.project_id == document.project_id:
             attached.append({'parent_version_id': parent, 'document_id': child.document_id,
                              'version_id': child.id, 'filename': child.filename})
-    return {'id': document.id, 'title': document.title, 'version': document.version, 'attachments': attached,
+    return {'id': document.id, 'title': document.title, 'version': document.version,
+            'lifecycle': document.lifecycle, 'category': document.category, 'attachments': attached,
             'origins': [{'channel': o.channel, 'source_name': o.source_name, 'received_at': o.received_at,
                          'version_id': o.version_id} for o in db.scalars(select(Occurrence).where(
                              Occurrence.version_id.in_([v.id for v in versions])))],

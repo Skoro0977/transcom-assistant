@@ -13,6 +13,7 @@ from .db import Membership, Project, session_db
 from .documents import Document, DocumentVersion
 from .documents import router as documents_router
 from .knowledge import router as knowledge_router
+from .lifecycle import router as lifecycle_router
 from .limits import BodySizeLimit
 from .settings import ROOT, settings
 from .worker import start as start_worker
@@ -32,6 +33,7 @@ app.add_middleware(BodySizeLimit)
 app.include_router(auth_router)
 app.include_router(documents_router)
 app.include_router(knowledge_router)
+app.include_router(lifecycle_router)
 
 
 @app.middleware('http')

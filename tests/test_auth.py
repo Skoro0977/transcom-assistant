@@ -91,6 +91,13 @@ def test_upload_duplicates_versions_and_private_files(isolated, tmp_path, monkey
     assert reverted.status_code == 201 and reverted.json()['number'] == 3
     assert not reverted.json()['duplicate']
     assert client.post(url, files={'file': ('program.exe', b'MZ')}, headers=headers).status_code == 422
+    assert client.post('/api/documents/' + first['id'] + '/archive',
+        json={'expected_version': 3, 'state': 'archived'}, headers=headers).status_code == 200
+    assert client.post('/api/documents/' + first['id'] + '/archive',
+        json={'expected_version': 4, 'state': 'active'}, headers=headers).status_code == 200
+    with db.SessionLocal() as session:
+        from sqlalchemy import select
+        assert all(j.status == 'queued' for j in session.scalars(select(documents.Job).where(documents.Job.kind == 'parse')))
     client.post('/api/auth/login', json={k: accounts[-1][k] for k in ('username', 'password')})
     assert client.get('/api/documents/' + first['id'] + '/content').status_code == 404
 
@@ -172,6 +179,9 @@ def test_decisions_are_atomic_versioned_and_individual_for_conflicts(isolated):
         json={'decision': 'accepted', 'expected_version': 1}, headers=headers).status_code == 409
     result = client.get('/api/projects/' + project + '/requirements').json()[0]
     assert result['version'] == 2 and result['data']['due_date'] == '2026-11-21'
+    history = client.get('/api/records/' + record['id'] + '/history').json()
+    assert [r['number'] for r in history] == [1, 2]
+    assert history[1]['changes']['due_date'] == {'before': '2026-11-20', 'after': '2026-11-21'}
     with db.SessionLocal() as session:
         from sqlalchemy import select
 
@@ -213,3 +223,145 @@ def test_ai_must_ground_proposals_and_cannot_accept_them(isolated, tmp_path, mon
     assert client.get('/api/projects/' + project + '/requirements').json() == []
     with db.SessionLocal() as session:
         assert session.scalar(select(documents.Job).where(documents.Job.id == job['job_id'])).status == 'done'
+
+
+def test_purge_requires_archive_and_confirmation_and_suppresses_reimport(isolated, tmp_path, monkeypatch):
+    from sqlalchemy import select
+
+    from apps.api.lifecycle import cleanup_blob
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    url = '/api/projects/' + project + '/documents'
+    item = client.post(url, files={'file': ('remove.txt', b'permanent-delete-test-only')}, headers=headers).json()
+    base = '/api/documents/' + item['id']
+    second = client.post(url, params={'document_id': item['id'], 'expected_version': 1},
+                         files={'file': ('remove-v2.txt', b'second-permanent-test-version')}, headers=headers)
+    assert second.status_code == 201 and len(list(storage.iterdir())) == 2
+    proposal = client.post('/api/projects/' + project + '/proposals',
+        json={'data': {'title': 'Решение для проверки удаления', 'text': 'Принятое решение'}}, headers=headers).json()
+    with db.SessionLocal() as session:
+        from apps.api.knowledge import Proposal
+        accepted_source = session.get(Proposal, proposal['id'])
+        accepted_source.source_version_id = second.json()['version_id']
+        accepted_source.source_document_version = 2
+        accepted_source.evidence = [{'version_id': second.json()['version_id'], 'document_id': item['id'],
+                                    'locator': 'Текст', 'quote': 'Тестовая цитата'}]
+        session.commit()
+    assert client.post('/api/proposals/' + proposal['id'] + '/decision',
+        json={'decision': 'accepted', 'expected_version': 1}, headers=headers).status_code == 200
+    assert client.post(base + '/purge-challenge', json={'expected_version': 1}, headers=headers).status_code == 409
+    archived = client.post(base + '/archive', json={'expected_version': 2, 'state': 'archived'}, headers=headers).json()
+    assert archived['version'] == 3
+    token = client.post(base + '/purge-challenge', json={'expected_version': 3}, headers=headers).json()['token']
+    assert client.post(base + '/purge', json={'expected_version': 3, 'token': token, 'confirmation': 'нет'}, headers=headers).status_code == 422
+    assert client.get(base + '/content').status_code == 200
+    other = client.post('/api/auth/login', json={k: accounts[-1][k] for k in ('username', 'password')}).json()
+    assert client.post(base + '/purge', json={'expected_version': 3, 'token': token, 'confirmation': 'УДАЛИТЬ'},
+        headers={'X-CSRF-Token': other['csrf_token']}).status_code == 409
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    removed = client.post(base + '/purge', json={'expected_version': 3, 'token': token, 'confirmation': 'УДАЛИТЬ'}, headers=headers)
+    assert removed.status_code == 200 and removed.json()['status'] == 'purge_queued'
+    assert client.get(base + '/content').status_code == 404
+    with db.SessionLocal() as session:
+        job_ids = list(session.scalars(select(documents.Job.id).join(documents.DocumentVersion, documents.DocumentVersion.id == documents.Job.version_id).where(documents.DocumentVersion.document_id == item['id'], documents.Job.kind == 'purge')))
+        assert session.get(documents.DocumentVersion, item['version_id']).text == ''
+    for job_id in job_ids:
+        cleanup_blob(job_id)
+    assert len(job_ids) == 2
+    retained = client.get('/api/projects/' + project + '/requirements').json()[0]
+    assert retained['data']['text'] == 'Принятое решение'
+    assert retained['evidence'][0]['removed'] and retained['evidence'][0]['quote'] == ''
+    assert not list(storage.iterdir())
+    assert client.post(url, files={'file': ('again.txt', b'permanent-delete-test-only')}, headers=headers).status_code == 409
+    temporary = tmp_path / 'again.txt'
+    temporary.write_bytes(b'permanent-delete-test-only')
+    with db.SessionLocal() as session:
+        result = documents.ingest(session, project, login['user']['id'],
+                                  temporary, 'again.txt', channel='folder', external_id='test-suppression')
+        assert result['suppressed']
+
+
+def test_stale_workers_cannot_restore_purged_contents(isolated, tmp_path, monkeypatch):
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from apps.api import analyzer, worker
+    from apps.api.analyzer import analyze_job, giga
+    from apps.api.knowledge import Proposal
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+
+    def remove(item):
+        base = '/api/documents/' + item['id']
+        assert client.post(base + '/archive', json={'expected_version': 1, 'state': 'archived'}, headers=headers).status_code == 200
+        token = client.post(base + '/purge-challenge', json={'expected_version': 2}, headers=headers).json()['token']
+        assert client.post(base + '/purge', json={'expected_version': 2, 'token': token, 'confirmation': 'УДАЛИТЬ'}, headers=headers).status_code == 200
+
+    item = client.post('/api/projects/' + project + '/documents', files={'file': ('race.txt', b'parse-race-test')}, headers=headers).json()
+    with db.SessionLocal() as session:
+        parse_id = session.scalar(select(documents.Job.id).where(documents.Job.version_id == item['version_id']))
+
+    def parser(args, **kwargs):
+        remove(item)
+        (Path(args[-1]) / 'result.json').write_text(json.dumps({'segments': [{'text': 'Removed text', 'locator': 'Text', 'quoted': False}],
+            'metadata': {}, 'warning': '', 'status': 'ready', 'attachments': []}), encoding='utf-8')
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(worker.subprocess, 'run', parser)
+    worker.process(parse_id)
+    with db.SessionLocal() as session:
+        assert session.get(documents.DocumentVersion, item['version_id']).text == ''
+    second = client.post('/api/projects/' + project + '/documents', files={'file': ('ai-race.txt', b'ai-race-test')}, headers=headers).json()
+    with db.SessionLocal() as session:
+        version = session.get(documents.DocumentVersion, second['version_id'])
+        version.text, version.status = 'Explicit source requirement', 'ready'
+        version.segments = [{'text': version.text, 'locator': 'Text', 'quoted': False}]
+        session.commit()
+    job = client.post('/api/documents/' + second['id'] + '/analyze', json={'expected_version': 1}, headers=headers).json()
+
+    def response(*args, **kwargs):
+        return json.dumps({'items': [{'data': {'title': 'Stale requirement'},
+            'evidence': [{'segment_index': 0, 'quote': 'Explicit source requirement'}]}]})
+
+    monkeypatch.setattr(giga, 'chat', response)
+    publication, purge_attempt, purge_finished = Event(), Event(), Event()
+    original_add = analyzer.add_proposal
+
+    def guarded_add(*args, **kwargs):
+        publication.set()
+        assert purge_attempt.wait(5)
+        assert not purge_finished.wait(0.2), 'Purge must wait for the publication transaction'
+        return original_add(*args, **kwargs)
+
+    def concurrent_remove():
+        purge_attempt.set()
+        try:
+            remove(second)
+        finally:
+            purge_finished.set()
+
+    monkeypatch.setattr(analyzer, 'add_proposal', guarded_add)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        analysis_future = executor.submit(analyze_job, job['job_id'])
+        assert publication.wait(5)
+        purge_future = executor.submit(concurrent_remove)
+        analysis_future.result(timeout=10)
+        purge_future.result(timeout=10)
+    with db.SessionLocal() as session:
+        assert session.get(documents.DocumentVersion, second['version_id']).text == ''
+        assert not list(session.scalars(select(Proposal).where(Proposal.status == 'pending')))

@@ -48,7 +48,11 @@ def batches(segments):
 
 def analyze_job(job_id):
     with db.SessionLocal() as session:
+        db.write_lock(session)
         job = session.get(Job, job_id)
+        if job.status not in {'queued', 'running'}:
+            return
+        job_stamp, job_cursor = job.updated_at, job.cursor
         source = session.get(DocumentVersion, job.version_id)
         document = session.get(Document, source.document_id)
         if document.lifecycle != 'active' or source.number != document.current_number:
@@ -90,7 +94,10 @@ def analyze_job(job_id):
                            for e in error.errors(include_input=False, include_url=False)[:6])
         raise ProviderError('Ответ AI не соответствует схеме; принятые данные не изменены. ' + fields[:300]) from None
     with db.SessionLocal() as session:
+        db.write_lock(session)
         job = session.get(Job, job_id)
+        if job.status not in {'queued', 'running'} or job.updated_at != job_stamp or job.cursor != job_cursor:
+            return
         source = session.get(DocumentVersion, job.version_id)
         document = session.get(Document, source.document_id)
         if document.lifecycle != 'active' or document.version != source_document_version:

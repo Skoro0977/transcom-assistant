@@ -44,8 +44,9 @@ def claim():
                                          Job.attempts < 3).values(status='queued'))
         session.execute(update(Job).where(Job.status == 'running', Job.updated_at < stale,
                                          Job.attempts >= 3).values(status='failed', error='Превышено число попыток'))
-        job = session.scalar(select(Job).where(Job.status == 'queued', Job.kind.in_(['parse', 'analyze']))
-                             .order_by(Job.updated_at).limit(1))
+        job = session.scalar(select(Job).where(Job.status == 'queued', Job.updated_at <= db.utcnow(),
+                                              Job.kind.in_(['parse', 'analyze', 'purge']))
+                             .order_by(Job.kind != 'purge', Job.updated_at).limit(1))
         if job is None:
             session.commit()
             return None
@@ -58,6 +59,21 @@ def claim():
 def process(job_id):
     with db.SessionLocal() as session:
         job = session.get(Job, job_id)
+        dispatch_stamp = job.updated_at
+        if job.kind == 'purge':
+            from .lifecycle import cleanup_blob
+            try:
+                cleanup_blob(job_id)
+            except OSError:
+                db.write_lock(session)
+                session.refresh(job)
+                if job.updated_at != dispatch_stamp:
+                    return
+                job.status = 'queued' if job.attempts < 6 else 'failed'
+                job.error = 'Не удалось физически удалить файл. Закройте открытый оригинал и повторите очистку'
+                job.updated_at = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+                session.commit()
+            return
         if job.kind == 'analyze':
             from .analyzer import analyze_job
             from .gigachat import ProviderError
@@ -65,18 +81,26 @@ def process(job_id):
                 analyze_job(job_id)
             except Exception as error:
                 logger.exception('Analysis job %s failed', job_id)
+                db.write_lock(session)
                 session.refresh(job)
+                if job.status not in {'queued', 'running'} or job.updated_at != dispatch_stamp:
+                    return
                 job.status = 'failed'
                 job.error = str(error) if isinstance(error, ProviderError) else 'Не удалось проанализировать документ'
                 job.updated_at = db.utcnow()
                 session.commit()
             return
     temporary = Path(tempfile.mkdtemp(prefix='parse-', dir=DATA / 'tmp'))
+    job_stamp = None
     if not temporary.resolve().is_relative_to((DATA / 'tmp').resolve()):
         raise RuntimeError('Unsafe parser workspace')
     try:
         with db.SessionLocal() as session:
+            db.write_lock(session)
             job = session.get(Job, job_id)
+            if job.status not in {'queued', 'running'}:
+                return
+            job_stamp = job.updated_at
             version = session.get(DocumentVersion, job.version_id)
             document = session.get(Document, version.document_id)
             if document.lifecycle != 'active':
@@ -99,6 +123,10 @@ def process(job_id):
             raise ValueError('Parser result limit')
         result = json.loads(result_path.read_text(encoding='utf-8'))
         with db.SessionLocal() as session:
+            db.write_lock(session)
+            job = session.get(Job, job_id)
+            if job.status not in {'queued', 'running'} or job.updated_at != job_stamp:
+                return
             version = session.get(DocumentVersion, version_id)
             if session.get(Document, version.document_id).lifecycle != 'active':
                 session.get(Job, job_id).status = 'cancelled'
@@ -109,6 +137,10 @@ def process(job_id):
             version.metadata_json = result['metadata']
             version.warning = result['warning']
             version.status = result['status']
+            if version.number > 1 and version.text:
+                analysis = session.scalar(select(Job).where(Job.version_id == version.id, Job.kind == 'analyze'))
+                if analysis is None:
+                    session.add(Job(project_id=version.project_id, version_id=version.id, kind='analyze'))
             session.commit()
         for index, item in enumerate(result['attachments']):
             raw_path = Path(item['path'])
@@ -117,22 +149,33 @@ def process(job_id):
                 raise ValueError('Unsafe attachment path')
             try:
                 with db.SessionLocal() as session:
+                    db.write_lock(session)
+                    parent_job = session.get(Job, job_id)
+                    parent_doc = session.get(Document, session.get(DocumentVersion, version_id).document_id)
+                    if (parent_doc.lifecycle != 'active' or parent_job.status not in {'queued', 'running'}
+                            or parent_job.updated_at != job_stamp):
+                        return
                     child = ingest(session, project_id, creator, path, item['name'], channel='attachment',
-                                   external_id=f'{version_id}:{index}', source_name=item['name'])
-                    linked = session.scalar(select(AttachmentLink).where(
-                        AttachmentLink.parent_version_id == version_id, AttachmentLink.child_version_id == child['version_id']))
-                    if linked is None and version_id != child['version_id']:
-                        session.add(AttachmentLink(parent_version_id=version_id, child_version_id=child['version_id']))
-                        session.commit()
+                                   external_id=f'{version_id}:{index}', source_name=item['name'], parent_version_id=version_id)
+                    if child.get('suppressed'):
+                        continue
             except (HTTPException, OSError, ValueError, SQLAlchemyError):
                 logger.exception('Attachment rejected for version %s', version_id)
                 with db.SessionLocal() as session:
+                    db.write_lock(session)
+                    current_job = session.get(Job, job_id)
                     version = session.get(DocumentVersion, version_id)
+                    if (session.get(Document, version.document_id).lifecycle != 'active'
+                            or current_job.status not in {'queued', 'running'} or current_job.updated_at != job_stamp):
+                        return
                     version.warning = (version.warning + '; Вложение не принято: неподдержанный формат или конфликт')[:4000]
                     version.status = 'needs_preparation'
                     session.commit()
         with db.SessionLocal() as session:
+            db.write_lock(session)
             job = session.get(Job, job_id)
+            if job.status not in {'queued', 'running'} or job.updated_at != job_stamp:
+                return
             job.status, job.updated_at = 'done', db.utcnow()
             session.commit()
     except Exception:
@@ -141,8 +184,13 @@ def process(job_id):
         if parser_log.exists():
             logger.warning('Parser diagnostics: %s', parser_log.read_text(encoding='utf-8', errors='replace')[-8000:])
         with db.SessionLocal() as session:
+            db.write_lock(session)
             job = session.get(Job, job_id)
+            if job.status not in {'queued', 'running'} or job_stamp is None or job.updated_at != job_stamp:
+                return
             version = session.get(DocumentVersion, job.version_id)
+            if session.get(Document, version.document_id).lifecycle != 'active':
+                return
             job.status, job.error = 'failed', 'Не удалось безопасно обработать файл; доступен оригинал'
             job.updated_at = db.utcnow()
             version.status, version.warning = 'needs_preparation', job.error

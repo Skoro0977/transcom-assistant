@@ -132,22 +132,25 @@ def validate_target(session, project_id, body):
         raise HTTPException(422, 'У нового требования нет базовой редакции')
 
 
-def fingerprint_for(body, evidence, source_id):
+def fingerprint_for(body, evidence, source_id, source_epoch=0):
     content = body.model_dump(mode='json', exclude={'evidence', 'expected_version'})
     content['conflict'] = body.conflict or bool(body.target_id)
-    return hashlib.sha256(json.dumps([content, evidence or [], source_id],
+    parts = [content, evidence or [], source_id]
+    if source_epoch:
+        parts.append(source_epoch)
+    return hashlib.sha256(json.dumps(parts,
                                      sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def add_proposal(session, project_id, author_id, body, evidence=None, source=None, origin='manual'):
     db.write_lock(session)
     validate_target(session, project_id, body)
-    fingerprint = fingerprint_for(body, evidence, source.id if source else None)
+    document = session.get(Document, source.document_id) if source else None
+    fingerprint = fingerprint_for(body, evidence, source.id if source else None, document.version if document else 0)
     existing = session.scalar(select(Proposal).where(Proposal.project_id == project_id,
                                                      Proposal.fingerprint == fingerprint))
     if existing:
         return existing
-    document = session.get(Document, source.document_id) if source else None
     proposal = Proposal(project_id=project_id, author_id=author_id, kind=body.kind, target_id=body.target_id,
         base_version=body.base_version, data=body.data.model_dump(mode='json'), evidence=evidence or [],
         source_version_id=source.id if source else None, source_document_version=document.version if document else 0,
@@ -170,7 +173,7 @@ def decide(session, proposal, body, user_id):
         if proposal.source_version_id:
             source = session.get(DocumentVersion, proposal.source_version_id)
             document = session.get(Document, source.document_id)
-            if document.lifecycle != 'active' or document.version != proposal.source_document_version:
+            if document.lifecycle != 'active' or document.current_number != source.number:
                 raise HTTPException(409, 'Источник изменился или исключен из работы; нужен повторный анализ')
         if proposal.target_id:
             record = session.get(Record, proposal.target_id)
@@ -212,7 +215,7 @@ def edit_proposal(proposal_id: str, body: ProposalEdit, who: Identity = Depends(
         raise HTTPException(404, 'Предложение не найдено')
     project_access(proposal.project_id, session, who, 'edit')
     validate_target(session, proposal.project_id, body)
-    fingerprint = fingerprint_for(body, proposal.evidence, proposal.source_version_id)
+    fingerprint = fingerprint_for(body, proposal.evidence, proposal.source_version_id, proposal.source_document_version)
     existing = session.scalar(select(Proposal).where(Proposal.project_id == proposal.project_id,
         Proposal.fingerprint == fingerprint, Proposal.id != proposal.id))
     if existing:

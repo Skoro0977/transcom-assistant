@@ -1,17 +1,19 @@
 import { useEffect, useState } from 'react';
-import { Alert, App, Button, Card, Checkbox, Empty, Form, Input, Modal, Pagination, Select, Space, Tag, Typography } from 'antd';
+import { Alert, App, Button, Card, Checkbox, Drawer, Empty, Form, Input, Modal, Pagination, Select, Space, Tag, Typography } from 'antd';
 import { CheckOutlined, CloseOutlined, EditOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, post, stamp } from './api';
 
-export type Evidence = { version_id: string; document_id: string; locator: string; quote: string };
+export type Evidence = { version_id: string; document_id: string; locator: string; quote: string; removed?: boolean };
 export type Fact = { title: string; text: string; scope: string; due_date: string | null;
   source_date: string | null; owner: string; status: string };
 export type Accepted = { id: string; version: number; kind: string; data: Fact; evidence: Evidence[] };
 type Proposal = Accepted & { target_id: string | null; base_version: number; conflict: boolean; note: string;
   origin: string; created_at: string; status: string; reason: string };
 type Job = { id: string; kind: string; status: string; cursor: number; error: string };
+type History = { number: number; data: Fact; evidence: Evidence[]; author: string; created_at: string; reason: string;
+  changes: Record<string, { before: unknown; after: unknown }> };
 export function EvidenceList({ items }: { items: Evidence[] }) {
-  return <>{!items.length && <Typography.Text type="secondary">Ручное решение, документальное основание не указано</Typography.Text>}{items.map((e, i) => <div className="evidence" key={i}><Typography.Text strong>{e.locator}</Typography.Text><blockquote>{e.quote}</blockquote><a href={`/api/document-versions/${e.version_id}/content`}>Оригинал этой редакции</a></div>)}</>;
+  return <>{!items.length && <Typography.Text type="secondary">Ручное решение, документальное основание не указано</Typography.Text>}{items.map((e, i) => <div className="evidence" key={i}>{e.removed ? <Typography.Text type="warning">Источник окончательно удален, цитата недоступна</Typography.Text> : <><Typography.Text strong>{e.locator}</Typography.Text><blockquote>{e.quote}</blockquote><a href={`/api/document-versions/${e.version_id}/content`}>Оригинал этой редакции</a></>}</div>)}</>;
 }
 export function FactView({ data }: { data: Fact }) { return <><Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>{data.text}</Typography.Paragraph><Space wrap>{data.scope && <Tag>{data.scope}</Tag>}{data.due_date && <Tag color="blue">Срок: {data.due_date}</Tag>}{data.source_date && <Tag>Дата источника: {data.source_date}</Tag>}{data.owner && <Tag>Ответственный: {data.owner}</Tag>}{data.status === 'cancelled' && <Tag color="red">Отменено</Tag>}</Space></>; }
 export function Review({ projectId, accepted = false }: { projectId: string; accepted?: boolean }) {
@@ -22,6 +24,7 @@ export function Review({ projectId, accepted = false }: { projectId: string; acc
   const [page, setPage] = useState(1), [total, setTotal] = useState(0), [error, setError] = useState('');
   const [editing, setEditing] = useState<Proposal | null>(null), [create, setCreate] = useState(false), [saving, setSaving] = useState(false);
   const [decision, setDecision] = useState<{ proposal?: Proposal; value: string } | null>(null), [reason, setReason] = useState('');
+  const [history, setHistory] = useState<History[] | null>(null);
   function reload() { setRefresh(n => n + 1); setSelected([]); }
   useEffect(() => {
     let active = true;
@@ -45,15 +48,16 @@ export function Review({ projectId, accepted = false }: { projectId: string; acc
       {!accepted && <><Select aria-label="Состояние проверки" value={status} onChange={v => { setStatus(v); setPage(1); setSelected([]); }} options={[{ value: 'pending', label: 'Требует проверки' }, { value: 'accepted', label: 'Подтверждено' }, { value: 'rejected', label: 'Отклонено' }]} />
         {status === 'pending' && <Button disabled={!selected.length} onClick={() => { setReason(''); setDecision({ value: 'accepted' }); }}>Подтвердить выбранные ({selected.length})</Button>}</>}
     </div>
-    {!accepted && jobs.filter(j => j.status !== 'done' || j.error).map(j => <Alert key={j.id} showIcon type={j.status === 'failed' ? 'error' : 'info'} title={`Анализ: ${j.status}, обработано фрагментов: ${j.cursor}`} description={j.error} />)}
+    {!accepted && jobs.filter(j => j.kind === 'analyze' && (j.status !== 'done' || j.error)).map(j => <Alert key={j.id} showIcon type={j.status === 'failed' ? 'error' : 'info'} title={`Анализ: ${j.status}, обработано фрагментов: ${j.cursor}`} description={<>{j.error}{j.status === 'failed' && <Button onClick={() => void post(`/api/jobs/${j.id}/retry`).then(reload).catch(e => message.error(e.message))}>Повторить</Button>}</>} />)}
     {(accepted ? records : items).length === 0 && <Empty description={accepted ? 'Подтвержденных требований пока нет' : 'Предложений в этой выборке нет'} />}
-    {accepted ? records.map(r => <Card key={r.id} title={r.data.title} extra={<Tag>Редакция {r.version}</Tag>}><FactView data={r.data} /><EvidenceList items={r.evidence} /></Card>) : items.map(p => <Card key={p.id} title={<Space>{status === 'pending' && <Checkbox aria-label={`Выбрать ${p.data.title}`} disabled={p.conflict} checked={selected.includes(p.id)} onChange={e => setSelected(ids => e.target.checked ? [...ids, p.id] : ids.filter(id => id !== p.id))} />}<span>{p.data.title}</span></Space>} extra={<Tag color={p.conflict ? 'orange' : 'blue'}>{p.conflict ? 'Есть противоречие / изменение' : p.origin === 'gigachat' ? 'Предложение AI' : 'Ручное предложение'}</Tag>}>
+    {accepted ? records.map(r => <Card key={r.id} title={r.data.title} extra={<Space><Tag>Редакция {r.version}</Tag><Button onClick={() => void api<History[]>(`/api/records/${r.id}/history`).then(setHistory).catch(e => message.error(e.message))}>История</Button></Space>}><FactView data={r.data} /><EvidenceList items={r.evidence} /></Card>) : items.map(p => <Card key={p.id} title={<Space>{status === 'pending' && <Checkbox aria-label={`Выбрать ${p.data.title}`} disabled={p.conflict} checked={selected.includes(p.id)} onChange={e => setSelected(ids => e.target.checked ? [...ids, p.id] : ids.filter(id => id !== p.id))} />}<span>{p.data.title}</span></Space>} extra={<Tag color={p.conflict ? 'orange' : 'blue'}>{p.conflict ? 'Есть противоречие / изменение' : p.origin === 'gigachat' ? 'Предложение AI' : 'Ручное предложение'}</Tag>}>
       <Typography.Text type="secondary">{stamp(p.created_at)}</Typography.Text><FactView data={p.data} />
       {p.target_id && <Card size="small" title="Было" style={{ marginTop: 16 }}>{records.find(r => r.id === p.target_id && r.version === p.base_version)?.data.text || 'Базовая редакция уже изменилась. Сверьте актуальные данные перед исправлением предложения.'}<Tag>Базовая редакция {p.base_version}</Tag></Card>}
       {p.note && <Alert title={p.note} type="info" style={{ marginTop: 16 }} />}<EvidenceList items={p.evidence} />
       {status === 'pending' ? <Space wrap style={{ marginTop: 16 }}><Button type="primary" icon={<CheckOutlined />} onClick={() => { setReason(''); setDecision({ proposal: p, value: 'accepted' }); }}>Подтвердить</Button><Button icon={<EditOutlined />} onClick={() => { setEditing(p); form.setFieldsValue({ ...p.data, target_id: p.target_id, note: p.note }); setCreate(true); }}>Исправить</Button><Button danger icon={<CloseOutlined />} onClick={() => { setReason(''); setDecision({ proposal: p, value: 'rejected' }); }}>Отклонить</Button></Space> : <p>Причина решения: {p.reason || 'Не указана'}</p>}
     </Card>)}
     {!accepted && <Pagination current={page} total={total} pageSize={25} showSizeChanger={false} onChange={v => { setPage(v); setSelected([]); }} />}
+    <Drawer title="История требования" open={!!history} onClose={() => setHistory(null)} size={760}>{history?.map(r => <Card key={r.number} title={`Редакция ${r.number}`} style={{ marginBottom: 18 }}><Typography.Paragraph type="secondary">{stamp(r.created_at)} · {r.author}</Typography.Paragraph><FactView data={r.data} /><p>Причина: {r.reason || 'Не указана'}</p>{Object.entries(r.changes).map(([key, value]) => <p key={key}><Typography.Text strong>{({title:'Название',text:'Текст',scope:'Область',due_date:'Срок',source_date:'Дата источника',owner:'Ответственный',status:'Состояние'} as Record<string,string>)[key] || key}</Typography.Text>: {String(value.before ?? 'Нет данных')} → {String(value.after ?? 'Нет данных')}</p>)}<EvidenceList items={r.evidence} /></Card>)}</Drawer>
     <Modal title={decision?.value === 'accepted' ? 'Подтвердить изменение' : 'Отклонить предложение'} open={!!decision} onCancel={() => setDecision(null)} confirmLoading={saving} onOk={() => void decide()} okText="Сохранить решение"><Typography.Paragraph>{decision?.proposal?.conflict ? 'Это изменение или противоречие. Проверьте обе редакции и основание перед решением.' : 'Изменение будет записано в историю от вашего имени.'}</Typography.Paragraph><Input.TextArea aria-label="Причина решения" value={reason} maxLength={4000} onChange={e => setReason(e.target.value)} rows={3} /></Modal>
     <Modal title="Проект требования" open={create} onCancel={() => setCreate(false)} footer={null} destroyOnHidden><Form form={form} layout="vertical" initialValues={{ status: 'active' }} onFinish={async values => { setSaving(true); try { const target = records.find(r => r.id === values.target_id);
       const body = { kind: 'requirement', target_id: target?.id || null, base_version: target?.version || 0, conflict: !!target, note: values.note || '', data: { title: values.title, text: values.text || '', scope: values.scope || '', owner: values.owner || '', due_date: values.due_date || null, source_date: values.source_date || null, status: values.status || 'active' } };
