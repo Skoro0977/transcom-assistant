@@ -19,6 +19,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .auth import Identity, identity, project_access
+from .contracts import InputModel
 from .db import Base, session_db, uid, utcnow
 from .settings import DATA
 
@@ -246,7 +247,8 @@ def detail(document_id: str, who: Identity = Depends(identity), db: Session = De
                          'version_id': o.version_id} for o in db.scalars(select(Occurrence).where(
                              Occurrence.version_id.in_([v.id for v in versions])))],
             'versions': [{'id': v.id, 'number': v.number, 'filename': v.filename, 'status': v.status,
-                          'warning': v.warning, 'text': v.text[:200000], 'metadata': v.metadata_json,
+                          'warning': v.warning, 'text': v.text[:200000], 'text_truncated': len(v.text) > 200000,
+                          'metadata': v.metadata_json,
                           'created_at': v.created_at} for v in versions]}
 
 
@@ -260,3 +262,28 @@ def content(document_id: str, number: int | None = None, who: Identity = Depends
         raise HTTPException(404, 'Файл не найден')
     return FileResponse(blob_path(version.blob_key), filename=version.filename,
                         media_type=mimetypes.guess_type(version.filename)[0] or 'application/octet-stream')
+
+
+class ReparseInput(InputModel):
+    expected_version: int
+
+
+@router.post('/api/documents/{document_id}/reparse')
+def reparse(document_id: str, body: ReparseInput, who: Identity = Depends(identity),
+            db: Session = Depends(session_db)):
+    document = accessible_document(document_id, db, who)
+    project_access(document.project_id, db, who, 'edit')
+    if document.version != body.expected_version or document.lifecycle != 'active':
+        raise HTTPException(409, 'Документ изменился или исключен из работы')
+    version = db.scalar(select(DocumentVersion).where(DocumentVersion.document_id == document_id,
+                                                     DocumentVersion.number == document.current_number))
+    job = db.scalar(select(Job).where(Job.version_id == version.id, Job.kind == 'parse'))
+    if job is None:
+        job = Job(project_id=document.project_id, version_id=version.id)
+        db.add(job)
+    elif job.status not in {'queued', 'running'}:
+        job.status, job.attempts, job.error = 'queued', 0, ''
+    if job.status != 'running':
+        version.status = 'queued'
+    db.commit()
+    return {'job_id': job.id, 'status': job.status}

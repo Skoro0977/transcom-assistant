@@ -2,16 +2,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import Identity, identity, project_access, public_user
 from .auth import router as auth_router
 from .contracts import ProjectInput
 from .db import Membership, Project, session_db
+from .documents import Document, DocumentVersion
 from .documents import router as documents_router
 from .limits import BodySizeLimit
-from .settings import settings
+from .settings import ROOT, settings
 from .worker import start as start_worker
 
 
@@ -70,5 +72,15 @@ def overview(project_id: str, who: Identity = Depends(identity), db: Session = D
     project = project_access(project_id, db, who)
     members = db.scalars(select(Membership).where(Membership.project_id == project_id)).all()
     from .db import User
+    counts = dict(db.execute(select(DocumentVersion.status, func.count()).join(Document,
+        Document.id == DocumentVersion.document_id).where(Document.project_id == project_id,
+        Document.lifecycle == 'active', DocumentVersion.number == Document.current_number)
+        .group_by(DocumentVersion.status)).all())
     return {'id': project.id, 'title': project.title, 'description': project.description,
-            'version': project.version, 'members': [public_user(db.get(User, m.user_id)) for m in members]}
+            'version': project.version, 'members': [public_user(db.get(User, m.user_id)) for m in members],
+            'document_counts': counts, 'gigachat_configured': bool(settings.gigachat_auth_key.get_secret_value())}
+
+
+frontend = ROOT / 'apps' / 'web' / 'dist'
+if frontend.is_dir():
+    app.mount('/', StaticFiles(directory=frontend, html=True), name='frontend')
