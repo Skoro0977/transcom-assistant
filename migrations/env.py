@@ -7,6 +7,7 @@ from apps.api import (
     lifecycle,  # noqa: F401
     risks,  # noqa: F401
     search,  # noqa: F401
+    sources,  # noqa: F401
     worker,  # noqa: F401
 )
 from apps.api.db import Base, engine

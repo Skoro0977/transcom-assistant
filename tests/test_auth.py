@@ -588,3 +588,121 @@ def test_chat_purge_late_response_and_summary_dates(isolated, tmp_path, monkeypa
     assert late.status_code == 409
     history = client.get(base + '/chat').json()
     assert len(history) == 1 and history[0]['citations'] == [] and '0.3' not in history[0]['answer']
+
+
+def test_sources_project_folders_reversions_and_readonly_mail_cursors(isolated, tmp_path, monkeypatch):
+    import time
+
+    from sqlalchemy import func, select
+
+    from apps.api import sources, vault
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    monkeypatch.setattr(sources, 'INBOX', tmp_path / 'inbox')
+    monkeypatch.setattr(vault, 'VAULT', tmp_path / 'vault')
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    base = '/api/projects/' + project
+    assert client.post(base + '/sources', json={'name': 'Неверный путь', 'kind': 'folder', 'path': str(tmp_path)}, headers=headers).status_code == 422
+    root = Path(client.get(base + '/sources').json()['inbox_path'])
+    feed = client.post(base + '/sources', json={'name': 'Входящие', 'kind': 'folder'}, headers=headers).json()
+    assert feed['version'] == 1
+    file = root / 'revision.txt'
+    for n, content in enumerate((b'A', b'B', b'A')):
+        file.write_bytes(content)
+        os.utime(file, (time.time() - 10 - n, time.time() - 10 - n))
+        assert client.post('/api/sources/' + feed['id'] + '/sync', headers=headers).status_code == 200
+        assert sources.poll_next()
+    with db.SessionLocal() as session:
+        version = session.scalar(select(documents.DocumentVersion).order_by(documents.DocumentVersion.number.desc()))
+        assert version.number == 3
+        assert session.scalar(select(func.count()).select_from(documents.Document)) == 1
+        before = session.scalar(select(func.count()).select_from(documents.Occurrence))
+    client.post('/api/sources/' + feed['id'] + '/sync', headers=headers).raise_for_status()
+    sources.poll_next()
+    with db.SessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(documents.Occurrence)) == before
+
+    mail = client.post(base + '/sources', headers=headers, json={'name': 'Тестовая почта', 'kind': 'gmail',
+        'username': 'synthetic@example.test', 'password': 'synthetic-app-password'}).json()
+    assert 'secret_ref' not in mail and mail['credentials_configured']
+    assert b'synthetic-app-password' not in b''.join(p.read_bytes() for p in (tmp_path / 'vault').glob('*'))
+    fail_second = True
+    mailbox = 'INBOX'
+
+    class FakeIMAP:
+        def __init__(self, host, port, ssl_context, timeout):
+            assert host == 'imap.gmail.com' and port == 993 and ssl_context.check_hostname
+
+        def login(self, username, password):
+            assert username == 'synthetic@example.test' and password == 'synthetic-app-password'
+
+        def select(self, folder, readonly):
+            assert readonly and folder == '"' + mailbox + '"'
+            return 'OK', [b'2']
+
+        def response(self, key):
+            assert key == 'UIDVALIDITY'
+            return key, [b'123']
+
+        def uid(self, operation, uid, query):
+            if operation == 'search':
+                return 'OK', [b'1 2']
+            if query == '(RFC822.SIZE)':
+                if uid == '2' and fail_second:
+                    return 'NO', []
+                return 'OK', [b'1 (RFC822.SIZE 100)']
+            assert query == '(BODY.PEEK[])'
+            return 'OK', [(b'body', ('From: synthetic@example.test\r\nSubject: ' + uid + '\r\n\r\nSynthetic mail ' + mailbox + uid).encode())]
+
+        def logout(self):
+            return 'BYE', []
+
+    monkeypatch.setattr(sources.imaplib, 'IMAP4_SSL', FakeIMAP)
+    assert sources.poll_next()
+    with db.SessionLocal() as session:
+        record = session.get(sources.Source, mail['id'])
+        assert record.status == 'error' and record.state['uid'] == 1
+    fail_second = False
+    client.post('/api/sources/' + mail['id'] + '/sync', headers=headers).raise_for_status()
+    assert sources.poll_next()
+    with db.SessionLocal() as session:
+        record = session.get(sources.Source, mail['id'])
+        assert record.state == {'uidvalidity': '123', 'uid': 2}
+        assert session.scalar(select(func.count()).select_from(documents.Occurrence).where(documents.Occurrence.channel == 'imap')) == 2
+        old_epoch = record.config['epoch']
+    invalid = client.post(base + '/sources', headers=headers, json={'name': 'Ошибка', 'kind': 'gmail',
+        'username': 'invalid', 'password': 'synthetic-sensitive-value', 'refresh_token': 'synthetic-sensitive-token'})
+    assert invalid.status_code == 422 and 'synthetic-sensitive' not in invalid.text
+    mailbox = 'OTHER'
+    changed = client.patch('/api/sources/' + mail['id'], headers=headers, json={'name': mail['name'], 'kind': 'gmail',
+        'username': 'synthetic@example.test', 'folder': mailbox, 'expected_version': mail['version']}).json()
+    assert 'epoch' not in changed['config']
+    assert sources.poll_next()
+    with db.SessionLocal() as session:
+        record = session.get(sources.Source, mail['id'])
+        assert record.status == 'ready' and record.state['uid'] == 2 and record.config['epoch'] != old_epoch
+        assert session.scalar(select(func.count()).select_from(documents.Occurrence).where(documents.Occurrence.channel == 'imap')) == 4
+        new_epoch = record.config['epoch']
+    client.patch('/api/sources/' + mail['id'], headers=headers, json={'name': 'Обновленное имя', 'kind': 'gmail',
+        'username': 'synthetic@example.test', 'folder': mailbox, 'expected_version': changed['version']}).raise_for_status()
+    with db.SessionLocal() as session:
+        record = session.get(sources.Source, mail['id'])
+        assert record.config['epoch'] == new_epoch and record.state['uid'] == 2
+    from fastapi import HTTPException
+    monkeypatch.setattr(sources, 'poll_mail', lambda _: (_ for _ in ()).throw(HTTPException(409, 'private details')))
+    assert sources.poll_next()
+    with db.SessionLocal() as session:
+        record = session.get(sources.Source, mail['id'])
+        assert record.status == 'error' and 'private details' not in record.notice
+    client.post('/api/auth/login', json={k: accounts[-1][k] for k in ('username', 'password')})
+    # This account shares the pilot, so verify another project rather than roles.
+    with db.SessionLocal() as session:
+        other = db.Project(title='Чужой проект')
+        session.add(other)
+        session.commit()
+        other_id = other.id
+    assert client.get('/api/projects/' + other_id + '/sources').status_code == 404

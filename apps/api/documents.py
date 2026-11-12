@@ -113,7 +113,7 @@ def blob_path(key: str):
 
 def ingest(db: Session, project_id: str, user_id: str, temporary: Path, filename: str,
            channel='upload', external_id=None, source_name=None, document_id=None, expected_version=None,
-           parent_version_id=None):
+           parent_version_id=None, before_commit=None):
     filename = filename_only(filename)
     if temporary.stat().st_size > MAX_BYTES:
         raise HTTPException(413, 'Файл превышает ограничение 100 МиБ')
@@ -128,8 +128,12 @@ def ingest(db: Session, project_id: str, user_id: str, temporary: Path, filename
     if db.scalar(select(PurgedContent).where(PurgedContent.project_id == project_id, PurgedContent.sha256 == checksum)):
         if channel == 'upload':
             raise HTTPException(409, 'Этот файл был окончательно удален. Повторное поступление тех же байтов заблокировано')
-        return {'id': None, 'version_id': None, 'number': 0, 'duplicate': False,
-                'suppressed': True, 'status': 'suppressed', 'lifecycle': 'purged'}
+        result = {'id': None, 'version_id': None, 'number': 0, 'duplicate': False,
+                  'suppressed': True, 'status': 'suppressed', 'lifecycle': 'purged'}
+        if before_commit:
+            before_commit(result)
+        db.commit()
+        return result
     document = db.get(Document, document_id) if document_id else None
     if document_id and (not document or document.project_id != project_id or document.lifecycle != 'active'):
         raise HTTPException(404, 'Активный документ не найден')
@@ -185,9 +189,12 @@ def ingest(db: Session, project_id: str, user_id: str, temporary: Path, filename
             if db.scalar(select(AttachmentLink).where(AttachmentLink.parent_version_id == parent_version_id,
                                                       AttachmentLink.child_version_id == version.id)) is None:
                 db.add(AttachmentLink(parent_version_id=parent_version_id, child_version_id=version.id))
-        db.commit()
-        return {'id': document.id, 'version_id': version.id, 'number': version.number,
+        result = {'id': document.id, 'version_id': version.id, 'number': version.number,
                 'duplicate': existing is not None, 'status': version.status, 'lifecycle': document.lifecycle}
+        if before_commit:
+            before_commit(result)
+        db.commit()
+        return result
     except Exception:
         db.rollback()
         if created_path and created_path.exists():

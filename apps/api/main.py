@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
@@ -20,6 +21,7 @@ from .planning import router as planning_router
 from .risks import router as risks_router
 from .search import router as search_router
 from .settings import ROOT, settings
+from .sources import router as sources_router
 from .worker import start as start_worker
 
 
@@ -34,6 +36,15 @@ async def lifespan(app):
 
 app = FastAPI(title='Транскоминжиниринг', version='0.1.0', lifespan=lifespan)
 app.add_middleware(BodySizeLimit)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, error: RequestValidationError):
+    # Pydantic's input can contain the whole request, including passwords/tokens.
+    return JSONResponse({'detail': [{key: item[key] for key in ('type', 'loc', 'msg') if key in item}
+                                    for item in error.errors()]}, status_code=422)
+
+
 app.include_router(auth_router)
 app.include_router(documents_router)
 app.include_router(knowledge_router)
@@ -42,6 +53,7 @@ app.include_router(search_router)
 app.include_router(planning_router)
 app.include_router(risks_router)
 app.include_router(assistant_router)
+app.include_router(sources_router)
 
 
 @app.middleware('http')

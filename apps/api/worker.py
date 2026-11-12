@@ -218,12 +218,17 @@ def start():
     def loop():
         from time import monotonic
         last_reminders = 0.0
+        last_sources = 0.0
         while not stop.is_set():
             try:
                 if monotonic() - last_reminders >= 60:
                     from .risks import notify_due
                     notify_due()
                     last_reminders = monotonic()
+                if monotonic() - last_sources >= 5:
+                    from .sources import poll_next
+                    poll_next()
+                    last_sources = monotonic()
                 job_id = claim()
                 if job_id:
                     process(job_id)
