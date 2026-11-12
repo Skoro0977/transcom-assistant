@@ -1,8 +1,9 @@
 import os
 import tempfile
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -21,6 +22,11 @@ class Settings(BaseSettings):
     session_hours: int = Field(default=12, ge=1, le=168)
     cookie_secure: bool = False
     worker_enabled: bool = True
+    gigachat_auth_key: SecretStr = SecretStr('')
+    gigachat_scope: Literal['GIGACHAT_API_PERS', 'GIGACHAT_API_B2B', 'GIGACHAT_API_CORP'] = 'GIGACHAT_API_PERS'
+    gigachat_model: str = 'GigaChat-2'
+    gigachat_embedding_model: str = 'Embeddings'
+    gigachat_ca_file: str = ''
     allowed_origins: str = 'http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:5173,http://localhost:5173'
 
 
