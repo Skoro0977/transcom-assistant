@@ -1,5 +1,6 @@
-from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class InputModel(BaseModel):
@@ -23,8 +24,13 @@ class DecisionInput(InputModel):
     reason: str = Field(default='', max_length=4000)
 
 
+class BatchDecisionItem(InputModel):
+    id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=1)
+
+
 class BatchDecisionInput(InputModel):
-    items: list[str] = Field(min_length=1, max_length=100)
+    items: list[BatchDecisionItem] = Field(min_length=1, max_length=100)
     decision: Literal['accepted', 'rejected']
     reason: str = Field(default='', max_length=4000)
 

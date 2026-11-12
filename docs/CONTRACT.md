@@ -29,7 +29,7 @@ User связан с Project через Membership. Каждый проект с
 | /api/documents/{id}/versions, /content | История и авторизованное чтение |
 | /api/projects/{id}/proposals | Очередь проверки, фильтры |
 | /api/proposals/{id}/decision | Решение с expected_version и ключом идемпотентности |
-| /api/projects/{id}/decisions | Выбранный набор без противоречий; версии определяются перед транзакцией |
+| /api/projects/{id}/decisions | Выбранный набор без противоречий; ID и expected_version для каждого элемента |
 | /api/projects/{id}/requirements, /events, /tasks, /stages, /risks | Предметные данные, редактирование через предложения |
 | /api/projects/{id}/search, /chat, /summary, /report | Поиск, вопросы, сводка и DOCX |
 | /api/projects/{id}/sources | Контроль папки, почты и входящих API |
