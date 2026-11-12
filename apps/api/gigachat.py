@@ -85,13 +85,16 @@ class GigaChat:
     def models(self):
         return self.request('GET', '/models')
 
-    def chat(self, system: str, text: str, max_tokens=1800):
+    def chat(self, system: str, text: str, max_tokens=1800, schema=None):
         if len(system) + len(text) > 60000:
             raise ProviderError('Контекст запроса слишком большой, выберите меньший набор источников')
-        data = self.request('POST', '/chat/completions', {
+        payload = {
             'model': settings.gigachat_model, 'messages': [{'role': 'system', 'content': system},
                                                          {'role': 'user', 'content': text}],
-            'temperature': 0.1, 'max_tokens': max_tokens, 'stream': False})
+            'temperature': 0.1, 'max_tokens': max_tokens, 'stream': False}
+        if schema is not None:
+            payload['response_format'] = {'type': 'json_schema', 'schema': schema, 'strict': True}
+        data = self.request('POST', '/chat/completions', payload)
         try:
             choice = data['choices'][0]
             content = choice['message']['content']

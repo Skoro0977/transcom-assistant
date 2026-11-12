@@ -82,7 +82,8 @@ class Occurrence(Base):
 class Job(Base):
     __tablename__ = 'jobs'
     __table_args__ = (ForeignKeyConstraint(['version_id', 'project_id'],
-                                          ['document_versions.id', 'document_versions.project_id']),)
+                                          ['document_versions.id', 'document_versions.project_id']),
+                     UniqueConstraint('version_id', 'kind', name='uq_jobs_version_kind'))
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     project_id: Mapped[str] = mapped_column(String(32), index=True)
     version_id: Mapped[str] = mapped_column(String(32), index=True)
@@ -90,6 +91,7 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(24), default='queued', index=True)
     attempts: Mapped[int] = mapped_column(default=0)
     error: Mapped[str] = mapped_column(Text, default='')
+    cursor: Mapped[int] = mapped_column(default=0, server_default='0')
     updated_at: Mapped[str] = mapped_column(String(40), default=utcnow)
 
 
@@ -266,6 +268,15 @@ def content(document_id: str, number: int | None = None, who: Identity = Depends
 
 class ReparseInput(InputModel):
     expected_version: int
+
+
+@router.get('/api/document-versions/{version_id}/content')
+def version_content(version_id: str, who: Identity = Depends(identity), db: Session = Depends(session_db)):
+    version = db.get(DocumentVersion, version_id)
+    if not version:
+        raise HTTPException(404, 'Редакция не найдена')
+    accessible_document(version.document_id, db, who)
+    return content(version.document_id, version.number, who, db)
 
 
 @router.post('/api/documents/{document_id}/reparse')

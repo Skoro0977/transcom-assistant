@@ -44,7 +44,7 @@ def claim():
                                          Job.attempts < 3).values(status='queued'))
         session.execute(update(Job).where(Job.status == 'running', Job.updated_at < stale,
                                          Job.attempts >= 3).values(status='failed', error='Превышено число попыток'))
-        job = session.scalar(select(Job).where(Job.status == 'queued', Job.kind == 'parse')
+        job = session.scalar(select(Job).where(Job.status == 'queued', Job.kind.in_(['parse', 'analyze']))
                              .order_by(Job.updated_at).limit(1))
         if job is None:
             session.commit()
@@ -56,6 +56,21 @@ def claim():
 
 
 def process(job_id):
+    with db.SessionLocal() as session:
+        job = session.get(Job, job_id)
+        if job.kind == 'analyze':
+            from .analyzer import analyze_job
+            from .gigachat import ProviderError
+            try:
+                analyze_job(job_id)
+            except Exception as error:
+                logger.exception('Analysis job %s failed', job_id)
+                session.refresh(job)
+                job.status = 'failed'
+                job.error = str(error) if isinstance(error, ProviderError) else 'Не удалось проанализировать документ'
+                job.updated_at = db.utcnow()
+                session.commit()
+            return
     temporary = Path(tempfile.mkdtemp(prefix='parse-', dir=DATA / 'tmp'))
     if not temporary.resolve().is_relative_to((DATA / 'tmp').resolve()):
         raise RuntimeError('Unsafe parser workspace')

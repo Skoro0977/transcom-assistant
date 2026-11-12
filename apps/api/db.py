@@ -39,6 +39,13 @@ def session_db():
         yield session
 
 
+def write_lock(session):
+    if session.get_bind().dialect.name == 'sqlite':
+        connection = session.connection()
+        if not connection.connection.driver_connection.in_transaction:
+            connection.exec_driver_sql('BEGIN IMMEDIATE')
+
+
 class User(Base):
     __tablename__ = 'users'
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)

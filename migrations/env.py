@@ -2,6 +2,7 @@ from alembic import context
 
 from apps.api import (
     documents,  # noqa: F401
+    knowledge,  # noqa: F401
     worker,  # noqa: F401
 )
 from apps.api.db import Base, engine

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     worker_enabled: bool = True
     gigachat_auth_key: SecretStr = SecretStr('')
     gigachat_scope: Literal['GIGACHAT_API_PERS', 'GIGACHAT_API_B2B', 'GIGACHAT_API_CORP'] = 'GIGACHAT_API_PERS'
-    gigachat_model: str = 'GigaChat-2'
+    gigachat_model: str = 'GigaChat-3-Lightning'
     gigachat_embedding_model: str = 'Embeddings'
     gigachat_ca_file: str = ''
     allowed_origins: str = 'http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:5173,http://localhost:5173'

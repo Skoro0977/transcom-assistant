@@ -132,3 +132,84 @@ def test_mail_attachments_and_uncached_formulas(tmp_path):
     mail.set_content('From: old@example.org\nТолько пересланная переписка')
     source.write_bytes(mail.as_bytes())
     assert all(s['quoted'] for s in parse(source, tmp_path)['segments'] if s['locator'] != 'Тема письма')
+
+
+def test_decisions_are_atomic_versioned_and_individual_for_conflicts(isolated):
+    client, accounts = isolated
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.post('/api/projects', json={'title': 'Проверка решений'}, headers=headers).json()['id']
+    url = '/api/projects/' + project + '/proposals'
+    first = client.post(url, json={'data': {'title': 'Получить съемку', 'due_date': '2026-11-20'}}, headers=headers).json()
+    assert client.get('/api/projects/' + project + '/requirements').json() == []
+    accepted = client.post('/api/proposals/' + first['id'] + '/decision',
+        json={'decision': 'accepted', 'expected_version': 1}, headers=headers)
+    assert accepted.status_code == 200
+    record = client.get('/api/projects/' + project + '/requirements').json()[0]
+    assert record['version'] == 1
+    assert client.post('/api/proposals/' + first['id'] + '/decision',
+        json={'decision': 'accepted', 'expected_version': 1}, headers=headers).status_code == 409
+    changes = []
+    for deadline in ['2026-11-21', '2026-11-22']:
+        changes.append(client.post(url, json={'target_id': record['id'], 'base_version': 1,
+            'data': {'title': 'Получить съемку', 'due_date': deadline}}, headers=headers).json())
+    normal = client.post(url, json={'data': {'title': 'Проверить исходные данные'}}, headers=headers).json()
+    edited = client.patch('/api/proposals/' + normal['id'],
+        json={'expected_version': 1, 'data': {'title': 'Уточнить исходные данные'}}, headers=headers)
+    assert edited.status_code == 200
+    original_again = client.post(url, json={'data': {'title': 'Проверить исходные данные'}}, headers=headers).json()
+    assert original_again['id'] != normal['id'] and original_again['data']['title'] == 'Проверить исходные данные'
+    edited_again = client.post(url, json={'data': {'title': 'Уточнить исходные данные'}}, headers=headers).json()
+    assert edited_again['id'] == normal['id']
+    normal = original_again
+    batch = client.post('/api/projects/' + project + '/decisions', json={'decision': 'accepted',
+        'items': [{'id': normal['id'], 'expected_version': 1}, {'id': changes[0]['id'], 'expected_version': 1}]}, headers=headers)
+    assert batch.status_code == 422
+    assert len(client.get('/api/projects/' + project + '/requirements').json()) == 1
+    assert client.post('/api/proposals/' + changes[0]['id'] + '/decision',
+        json={'decision': 'accepted', 'expected_version': 1}, headers=headers).status_code == 200
+    assert client.post('/api/proposals/' + changes[1]['id'] + '/decision',
+        json={'decision': 'accepted', 'expected_version': 1}, headers=headers).status_code == 409
+    result = client.get('/api/projects/' + project + '/requirements').json()[0]
+    assert result['version'] == 2 and result['data']['due_date'] == '2026-11-21'
+    with db.SessionLocal() as session:
+        from sqlalchemy import select
+
+        from apps.api.knowledge import Revision
+        old = session.scalar(select(Revision).where(Revision.record_id == record['id'], Revision.number == 1))
+        assert old.data['due_date'] == '2026-11-20'
+
+
+def test_ai_must_ground_proposals_and_cannot_accept_them(isolated, tmp_path, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    from apps.api.analyzer import analyze_job, giga
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    doc = client.post('/api/projects/' + project + '/documents', files={'file': ('source.txt', b'source')}, headers=headers).json()
+    with db.SessionLocal() as session:
+        source = session.get(documents.DocumentVersion, doc['version_id'])
+        source.status, source.text = 'ready', 'Передать съемку до 20 ноября.'
+        source.segments = [{'text': source.text, 'locator': 'Текст', 'quoted': False}]
+        session.commit()
+    response = json.dumps({'items': [
+        {'data': {'title': 'Передать съемку'}, 'evidence': [{'segment_index': 0, 'quote': 'Передать съемку'}]},
+        {'data': {'title': 'Выдуманный факт'}, 'evidence': [{'segment_index': 0, 'quote': 'Этого текста нет'}]},
+    ]})
+    monkeypatch.setattr(giga, 'chat', lambda *args, **kwargs: response)
+    job = client.post('/api/documents/' + doc['id'] + '/analyze', json={'expected_version': 1}, headers=headers).json()
+    analyze_job(job['job_id'])
+    repeated = client.post('/api/documents/' + doc['id'] + '/analyze', json={'expected_version': 1}, headers=headers).json()
+    assert repeated['job_id'] == job['job_id'] and repeated['status'] == 'done'
+    proposals = client.get('/api/projects/' + project + '/proposals').json()
+    assert proposals['total'] == 1 and proposals['items'][0]['evidence'][0]['version_id'] == doc['version_id']
+    assert client.get('/api/projects/' + project + '/requirements').json() == []
+    with db.SessionLocal() as session:
+        assert session.scalar(select(documents.Job).where(documents.Job.id == job['job_id'])).status == 'done'

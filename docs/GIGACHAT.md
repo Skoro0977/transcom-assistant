@@ -12,3 +12,4 @@
 - https://developers.sber.ru/docs/ru/gigachat/api/reference/rest/post-chat
 - https://developers.sber.ru/docs/ru/gigachat/api/reference/rest/post-embeddings
 - https://developers.sber.ru/docs/ru/gigachat/certificates
+- https://developers.sber.ru/docs/ru/gigachat/guides/structured-output

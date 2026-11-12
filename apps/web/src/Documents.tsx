@@ -79,6 +79,7 @@ export function Documents({ projectId, changed }: { projectId: string; changed: 
           <Button href={`/api/documents/${detail.id}/content?number=${revision}`} icon={<DownloadOutlined />}>Оригинал</Button>
           <Button onClick={() => void open(detail.id)} icon={<ReloadOutlined />}>Обновить</Button></Space>
         <Status value={selected.status} />
+        <Button type="primary" disabled={selected.number !== detail.versions[0].number} onClick={() => void post<{ status: string }>(`/api/documents/${detail.id}/analyze`, { expected_version: detail.version }).then(result => message.success(result.status === 'done' ? 'Анализ уже выполнен. Откройте раздел проверки.' : 'Анализ поставлен в очередь. Предложения появятся в разделе проверки.')).catch(e => message.error(e.message))}>Проанализировать текущую редакцию через AI</Button>
         {selected.warning && <Alert title={selected.warning} type="warning" showIcon />}
         {selected.text_truncated && <Alert title="Показаны первые 200 000 символов. Полный документ доступен в оригинале." type="info" showIcon />}
         <Tabs items={[
