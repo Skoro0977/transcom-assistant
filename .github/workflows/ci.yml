@@ -20,3 +20,7 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci --include=optional && npm run build
         working-directory: apps/web
+      - run: npm ci --ignore-scripts
+        working-directory: tools/ocr
+      - run: python -B -m alembic upgrade head && python -B -m alembic check
+      - run: python -B -m pytest tests --basetemp "$RUNNER_TEMP/transcom-pytest"

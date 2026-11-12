@@ -35,3 +35,23 @@ def test_standalone_check_creates_report_directory(tmp_path, monkeypatch):
         chat=lambda *args, **kwargs: 'работает', embeddings=lambda _: [[0.1, 0.2]]))
     assert check_gigachat.main() == 0
     assert (tmp_path / 'local' / 'gigachat-check.json').is_file()
+
+def test_extraction_serialized_budget_includes_candidates_and_schema_retry(monkeypatch):
+    import json
+
+    from apps.api.analyzer import extract, giga
+    calls = []
+    system = 'Rules ' * 2000
+    payload = {'fragments': [{'segment_index': 0, 'text': 'A' * 15000}],
+               'accepted_candidates': [{'id': str(i), 'data': {'text': '\\"' * 1800,
+                   'scope': 'S' * 1000, 'depends_on': ['x' * 32] * 20}} for i in range(8)]}
+    def response(instructions, text, **kwargs):
+        calls.append(len(instructions) + len(text))
+        if len(calls) == 1:
+            return json.dumps({'items': [{'kind': 'requirement', 'data': {'title': 'Synthetic'},
+                'evidence': [], 'X' * 10000: '\\' * 15000}]})
+        return '{"items":[]}'
+    monkeypatch.setattr(giga, 'chat', response)
+    assert not extract(system, payload).items
+    assert len(calls) == 2 and max(calls) <= 60000
+    assert len(payload['accepted_candidates']) < 8

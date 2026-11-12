@@ -213,12 +213,21 @@ def test_ai_must_ground_proposals_and_cannot_accept_them(isolated, tmp_path, mon
         source.segments = [{'text': source.text, 'locator': 'Текст', 'quoted': False}]
         session.commit()
     response = json.dumps({'items': [
-        {'data': {'title': 'Передать съемку'}, 'evidence': [{'segment_index': 0, 'quote': 'Передать съемку'}]},
-        {'data': {'title': 'Выдуманный факт'}, 'evidence': [{'segment_index': 0, 'quote': 'Этого текста нет'}]},
+        {'kind': 'requirement', 'data': {'title': 'Передать съемку'}, 'evidence': [{'segment_index': 0, 'quote': 'Передать съемку'}]},
+        {'kind': 'requirement', 'data': {'title': 'Выдуманный факт'}, 'evidence': [{'segment_index': 0, 'quote': 'Этого текста нет'}]},
     ]})
-    monkeypatch.setattr(giga, 'chat', lambda *args, **kwargs: response)
+    calls = []
+    def repairing_response(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            invalid = json.loads(response)
+            invalid['items'][0]['stage_id'] = None
+            return json.dumps(invalid)
+        return response
+    monkeypatch.setattr(giga, 'chat', repairing_response)
     job = client.post('/api/documents/' + doc['id'] + '/analyze', json={'expected_version': 1}, headers=headers).json()
     analyze_job(job['job_id'])
+    assert len(calls) == 2
     repeated = client.post('/api/documents/' + doc['id'] + '/analyze', json={'expected_version': 1}, headers=headers).json()
     assert repeated['job_id'] == job['job_id'] and repeated['status'] == 'done'
     proposals = client.get('/api/projects/' + project + '/proposals').json()
@@ -338,7 +347,7 @@ def test_stale_workers_cannot_restore_purged_contents(isolated, tmp_path, monkey
     job = client.post('/api/documents/' + second['id'] + '/analyze', json={'expected_version': 1}, headers=headers).json()
 
     def response(*args, **kwargs):
-        return json.dumps({'items': [{'data': {'title': 'Stale requirement'},
+        return json.dumps({'items': [{'kind': 'requirement', 'data': {'title': 'Stale requirement'},
             'evidence': [{'segment_index': 0, 'quote': 'Explicit source requirement'}]}]})
 
     monkeypatch.setattr(giga, 'chat', response)
@@ -765,13 +774,15 @@ def test_chat_changes_require_confirmation_and_reject_stale_provider_results(iso
     assert accept(pending).status_code == 409
     assert 'synthetic-private-evidence' not in client.get(root + '/proposals?status=rejected').text
 
-def test_legacy_word_bounds_and_local_ocr(tmp_path):
+def test_legacy_word_bounds_and_local_ocr(tmp_path, monkeypatch):
+    import shutil
     import struct
 
     from PIL import Image, ImageDraw, ImageFont
 
     from apps.api.local_tools import word_pieces
     from apps.api.parse_file import parse
+    monkeypatch.setattr(settings, 'ocr_node', shutil.which('node'))
     word = bytearray(1024)
     struct.pack_into('<HH', word, 0, 0xA5EC, 0xC1)
     struct.pack_into('<H', word, 32, 14)
@@ -789,7 +800,8 @@ def test_legacy_word_bounds_and_local_ocr(tmp_path):
     with pytest.raises(ValueError):
         word_pieces(word, bad)
     image = Image.new('RGB', (1800, 400), 'white')
-    ImageDraw.Draw(image).text((50, 70), phrase, fill='black', font=ImageFont.truetype('C:/Windows/Fonts/arial.ttf', 64))
+    font = 'C:/Windows/Fonts/arial.ttf' if os.name == 'nt' else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+    ImageDraw.Draw(image).text((50, 70), phrase, fill='black', font=ImageFont.truetype(font, 64))
     source = tmp_path / 'synthetic.png'
     image.save(source)
     result = parse(source, tmp_path)

@@ -48,6 +48,8 @@ def identity(request: Request, db: Session = Depends(session_db)):
 
 
 def project_access(project_id: str, db: Session, who: Identity, permission: str = 'view'):
+    if not who.user.active:
+        raise HTTPException(401, 'Учетная запись отключена')
     membership = db.get(Membership, (who.user.id, project_id))
     if not membership:
         raise HTTPException(404, 'Проект не найден')
