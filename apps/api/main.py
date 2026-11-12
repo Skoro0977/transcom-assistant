@@ -15,6 +15,7 @@ from .contracts import ProjectInput
 from .db import Membership, Project, session_db
 from .documents import Document, DocumentVersion
 from .documents import router as documents_router
+from .integrations import router as integrations_router
 from .knowledge import router as knowledge_router
 from .lifecycle import router as lifecycle_router
 from .limits import BodySizeLimit
@@ -56,6 +57,7 @@ app.include_router(risks_router)
 app.include_router(assistant_router)
 app.include_router(sources_router)
 app.include_router(changes_router)
+app.include_router(integrations_router)
 
 
 @app.middleware('http')

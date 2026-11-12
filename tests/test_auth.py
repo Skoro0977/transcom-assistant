@@ -807,3 +807,117 @@ def test_legacy_word_bounds_and_local_ocr(tmp_path):
     from defusedxml.common import DefusedXmlException
     with pytest.raises(DefusedXmlException):
         parse(kml, tmp_path)
+
+def test_incoming_api_and_linked_bots_are_scoped_idempotent_and_confirmed(isolated, tmp_path, monkeypatch):
+    import re
+
+    from sqlalchemy import func, select
+
+    from apps.api import changes, integrations, vault
+    from apps.api.knowledge import Proposal, Record, Revision
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'; storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    monkeypatch.setattr(vault, 'VAULT', tmp_path / 'vault')
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    root = '/api/projects/' + project
+    feed = client.post(root + '/integrations', headers=headers, json={'name': 'API', 'kind': 'api'}).json()
+    url = '/api/incoming/' + feed['id'] + '/files'
+    auth = {'Authorization': 'Bearer ' + feed['incoming_key']}
+    assert client.post(url, files={'file': ('test.txt', b'A')}, data={'external_id': '1'}).status_code == 403
+    first = client.post(url, files={'file': ('test.txt', b'A')}, data={'external_id': '1'}, headers=auth)
+    assert first.status_code == 200
+    assert client.post(url, files={'file': ('test.txt', b'A')}, data={'external_id': '1'}, headers=auth).json()['duplicate']
+    assert client.post(url, files={'file': ('test.txt', b'B')}, data={'external_id': '1'}, headers=auth).status_code == 409
+    assert 'incoming_key' not in client.get(root + '/integrations').text
+    telegram = client.post(root + '/integrations', headers=headers, json={'name': 'Telegram', 'kind': 'telegram',
+        'chat_ids': [10], 'bot_token': '123:synthetic', 'reply_enabled': True}).json()
+    tgurl = '/api/incoming/' + telegram['id'] + '/telegram'
+    tgh = {'X-Telegram-Bot-Api-Secret-Token': telegram['incoming_key']}
+    responses = []
+    monkeypatch.setattr(integrations, 'send_reply', lambda snapshot, peer, text: responses.append(text))
+    def event(n, text, sender=21, message_id=None, edited=False):
+        return {'update_id': n, 'edited_message' if edited else 'message': {'message_id': message_id or n,
+            'date': 1794499200, 'chat': {'id': 10}, 'from': {'id': sender}, 'text': text}}
+    assert client.post(tgurl, json=event(1, 'Original')).status_code == 403
+    assert client.post(tgurl, json=event(1, 'Original'), headers=tgh).status_code == 200
+    assert client.post(tgurl, json=event(1, 'Original'), headers=tgh).json()['duplicate']
+    client.post(tgurl, json=event(2, 'Original'), headers=tgh).raise_for_status()
+    client.post(tgurl, json=event(3, 'Changed', message_id=1, edited=True), headers=tgh).raise_for_status()
+    with db.SessionLocal() as session:
+        bound = list(session.scalars(select(integrations.IntegrationMessage)))
+        assert len(bound) == 2 and bound[0].document_id != bound[1].document_id
+        assert sorted(session.get(documents.Document, b.document_id).current_number for b in bound) == [1, 2]
+    metadata_edit = event(30, 'Changed', message_id=1, edited=True)
+    metadata_edit['edited_message']['edit_date'] = 1794499300
+    client.post(tgurl, json=metadata_edit, headers=tgh).raise_for_status()
+    with db.SessionLocal() as session:
+        assert sorted(session.get(documents.Document, b.document_id).current_number for b in bound) == [1, 3]
+    code = client.post('/api/integrations/' + telegram['id'] + '/link-code', headers=headers, json={'sender': '21'}).json()['command']
+    client.post(tgurl, json=event(4, code, sender=22), headers=tgh).raise_for_status()
+    assert 'не выполнено' in responses[-1]
+    client.post(tgurl, json=event(5, code), headers=tgh).raise_for_status()
+    assert 'связан' in responses[-1]
+    monkeypatch.setattr(changes.giga, 'chat', lambda *a, **k: '{"patch":{"title":"Задача из чата","due_date":"2026-12-01"},"clarification":""}')
+    import httpx
+    fail_delivery = True
+    def interrupted_delivery(snapshot, peer, text):
+        nonlocal fail_delivery
+        if fail_delivery:
+            fail_delivery = False
+            raise httpx.ConnectError('synthetic delivery failure')
+        responses.append(text)
+    monkeypatch.setattr(integrations, 'send_reply', interrupted_delivery)
+    new_event = event(6, '/new task Назначить работу')
+    assert client.post(tgurl, json=new_event, headers=tgh).status_code == 503
+    assert client.post(tgurl, json=new_event, headers=tgh).json()['duplicate']
+    confirmation = re.search(r'/confirm ([A-Za-z0-9_-]+)', responses[-1])[1]
+    with db.SessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(Record)) == 0
+        assert session.scalar(select(Proposal)).status == 'pending'
+    client.post(tgurl, json=event(7, '/confirm ' + confirmation, sender=22), headers=tgh).raise_for_status()
+    with db.SessionLocal() as session: assert session.scalar(select(func.count()).select_from(Record)) == 0
+    client.post(tgurl, json=event(8, '/confirm ' + confirmation), headers=tgh).raise_for_status()
+    client.post(tgurl, json=event(9, '/confirm ' + confirmation), headers=tgh).raise_for_status()
+    with db.SessionLocal() as session: assert session.scalar(select(func.count()).select_from(Revision)) == 1
+    vk = client.post(root + '/integrations', headers=headers, json={'name': 'VK', 'kind': 'vk', 'chat_ids': [10],
+        'group_id': 1, 'bot_token': 'synthetic', 'confirmation_code': 'synthetic_confirmation'}).json()
+    vkurl = '/api/incoming/' + vk['id'] + '/vk'
+    assert client.post(vkurl, json={'type': 'confirmation', 'group_id': 2, 'secret': vk['incoming_key']}).status_code == 403
+    assert client.post(vkurl, json={'type': 'confirmation', 'group_id': 1, 'secret': vk['incoming_key']}).text == 'synthetic_confirmation'
+    payload = {'type': 'message_new', 'event_id': 'vk1', 'group_id': 1, 'secret': vk['incoming_key'],
+        'object': {'message': {'id': 1, 'peer_id': 10, 'from_id': 21, 'date': 1794499200, 'text': 'VK original'}}}
+    assert client.post(vkurl, json=payload).text == 'ok'
+    assert client.post(vkurl, json=payload).text == 'ok'
+    from apps.api.search import index_version
+    with db.SessionLocal() as session:
+        version = session.get(documents.DocumentVersion, first.json()['version_id'])
+        version.text = 'sensitive-outbox-source'
+        version.segments = [{'text': version.text, 'locator': 'fixture', 'quoted': False}]
+        version.status = 'ready'
+        index_version(session, version)
+        session.commit()
+    fail_delivery = True
+    question_event = event(40, '/ask sensitive-outbox-source')
+    assert client.post(tgurl, json=question_event, headers=tgh).status_code == 503
+    with db.SessionLocal() as session:
+        saved_reply = dict(session.get(integrations.Receipt, (telegram['id'], '40')).reply)
+        assert 'sensitive-outbox-source' in saved_reply['text']
+    doc_id = first.json()['id']
+    client.post('/api/documents/' + doc_id + '/archive', headers=headers, json={'expected_version': 1, 'state': 'archived'}).raise_for_status()
+    ticket = client.post('/api/documents/' + doc_id + '/purge-challenge', headers=headers, json={'expected_version': 2}).json()
+    client.post('/api/documents/' + doc_id + '/purge', headers=headers,
+        json={'expected_version': 2, 'token': ticket['token'], 'confirmation': 'УДАЛИТЬ'}).raise_for_status()
+    before_delivery = len(responses)
+    assert client.post(tgurl, json=question_event, headers=tgh).json()['duplicate']
+    assert len(responses) == before_delivery
+    with db.SessionLocal() as session:
+        assert not session.get(integrations.Receipt, (telegram['id'], '40')).reply
+    snapshot = integrations.authenticate(telegram['id'], telegram['incoming_key'], 'telegram')
+    integrations.finish(snapshot, '40', 'done', reply=saved_reply, peer=10)
+    with db.SessionLocal() as session:
+        assert not session.get(integrations.Receipt, (telegram['id'], '40')).reply
+    for url in ['http://127.0.0.1/private', 'https://attacker.invalid/file', 'https://userapi.com@127.0.0.1/file']:
+        with pytest.raises(ValueError): integrations.download(url, tmp_path / 'forbidden')

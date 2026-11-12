@@ -199,9 +199,11 @@ def purge(document_id: str, body: PurgeInput, who: Identity = Depends(identity),
     from .documents import Occurrence
     for origin in session.scalars(select(Occurrence).where(Occurrence.version_id.in_(ids))):
         origin.source_name, origin.external_id = 'Удаленный источник', digest(origin.external_id)
+    removed_proposals = set()
     for proposal in session.scalars(select(Proposal).where(Proposal.project_id == document.project_id)):
         if (proposal.source_version_id in ids or any(e.get('version_id') in ids for e in proposal.evidence)
                 or (proposal.kind == 'document' and proposal.data.get('document_id') == document_id)):
+            removed_proposals.add(proposal.id)
             proposal.data = FactData(title='Источник удален').model_dump(mode='json')
             proposal.evidence, proposal.note = [], 'Источник окончательно удален'
             proposal.version += 1
@@ -217,6 +219,11 @@ def purge(document_id: str, body: PurgeInput, who: Identity = Depends(identity),
             turn.answer, turn.citations = 'Основание ответа окончательно удалено.', []
             turn.source_ids = []
             turn.notice = 'Повторите вопрос по оставшимся источникам.'
+    from .integrations import Integration, Receipt
+    for receipt in session.scalars(select(Receipt).join(Integration, Integration.id == Receipt.integration_id)
+            .where(Integration.project_id == document.project_id)):
+        if set(receipt.reply.get('source_ids', [])) & ids or receipt.reply.get('proposal_id') in removed_proposals:
+            receipt.reply = {}
     document.lifecycle, document.version = 'purged', document.version + 1
     document.title, document.category = 'Удаленный документ', ''
     session.execute(delete(PurgeChallenge).where(PurgeChallenge.document_id == document_id))

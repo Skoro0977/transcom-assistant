@@ -113,7 +113,7 @@ def blob_path(key: str):
 
 def ingest(db: Session, project_id: str, user_id: str, temporary: Path, filename: str,
            channel='upload', external_id=None, source_name=None, document_id=None, expected_version=None,
-           parent_version_id=None, before_commit=None):
+           parent_version_id=None, before_commit=None, deduplicate=True, force_version=False):
     filename = filename_only(filename)
     if temporary.stat().st_size > MAX_BYTES:
         raise HTTPException(413, 'Файл превышает ограничение 100 МиБ')
@@ -144,7 +144,7 @@ def ingest(db: Session, project_id: str, user_id: str, temporary: Path, filename
     if document_id:
         duplicate_query = duplicate_query.where(DocumentVersion.document_id == document_id,
                                                  DocumentVersion.number == document.current_number)
-    existing = db.scalar(duplicate_query.limit(1))
+    existing = db.scalar(duplicate_query.limit(1)) if not force_version and (deduplicate or document_id) else None
     created_path = None
     try:
         if existing:

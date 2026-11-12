@@ -3,6 +3,7 @@ from alembic import context
 from apps.api import (
     assistant,  # noqa: F401
     documents,  # noqa: F401
+    integrations,  # noqa: F401
     knowledge,  # noqa: F401
     lifecycle,  # noqa: F401
     risks,  # noqa: F401

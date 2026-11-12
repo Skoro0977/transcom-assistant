@@ -52,9 +52,7 @@ def base_data(session, project_id, body):
     return dict(revision.data), list(revision.evidence)
 
 
-@router.post('/api/projects/{project_id}/chat/changes', status_code=201)
-def propose_change(project_id: str, body: ChangeRequest, who: Identity = Depends(identity),
-                   session: Session = Depends(db.session_db)):
+def prepare_change(project_id, body, who, session, guard=None):
     project_access(project_id, session, who, 'edit')
     before, evidence = base_data(session, project_id, body)
     allowed = set(DATA_TYPES[body.kind].model_fields) - {'document_id', 'document_version'}
@@ -86,6 +84,8 @@ def propose_change(project_id: str, body: ChangeRequest, who: Identity = Depends
     fresh, fresh_evidence = base_data(session, project_id, body)
     if fresh != before or fresh_evidence != evidence:
         raise HTTPException(409, 'Карточка или основания изменились во время подготовки')
+    if guard:
+        guard(session)
     if clarification:
         return {'clarification': clarification, 'proposal': None}
     if not patch or set(patch) - allowed:
@@ -103,3 +103,9 @@ def propose_change(project_id: str, body: ChangeRequest, who: Identity = Depends
         evidence=evidence, origin='chat')
     session.commit()
     return {'clarification': '', 'proposal': serial(proposal), 'before': before}
+
+
+@router.post('/api/projects/{project_id}/chat/changes', status_code=201)
+def propose_change(project_id: str, body: ChangeRequest, who: Identity = Depends(identity),
+                   session: Session = Depends(db.session_db)):
+    return prepare_change(project_id, body, who, session)

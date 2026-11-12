@@ -134,9 +134,10 @@ def process(job_id):
                 return
             version.segments = result['segments']
             version.text = '\n\n'.join(s['text'] for s in result['segments'])
-            version.metadata_json = result['metadata']
-            version.warning = result['warning']
-            version.status = result['status']
+            version.metadata_json = {**version.metadata_json, **result['metadata']}
+            connector_warnings = version.metadata_json.get('connector_warnings', [])
+            version.warning = '; '.join([result['warning'], *connector_warnings]).strip('; ')
+            version.status = 'needs_preparation' if connector_warnings else result['status']
             from .search import index_version
             index_version(session, version)
             if version.number > 1 and version.text:
