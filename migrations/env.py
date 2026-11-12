@@ -4,6 +4,7 @@ from apps.api import (
     documents,  # noqa: F401
     knowledge,  # noqa: F401
     lifecycle,  # noqa: F401
+    risks,  # noqa: F401
     search,  # noqa: F401
     worker,  # noqa: F401
 )

@@ -16,7 +16,8 @@ STAGES = ['Съемка', 'Трасса', 'Гидравлика', 'План', '�
 
 
 def deadline(data, as_of):
-    if data.get('status') == 'cancelled' or data.get('task_state') == 'done' or data.get('stage_state') == 'approved':
+    if (data.get('status') == 'cancelled' or data.get('task_state') == 'done'
+            or data.get('stage_state') == 'approved' or data.get('risk_state') == 'closed'):
         return 'closed'
     if not data.get('due_date'):
         return 'unknown'
@@ -39,7 +40,7 @@ def accepted_records(session, project_id, kind=None, as_of=None):
 
 
 @router.get('/api/projects/{project_id}/records')
-def records(project_id: str, kind: Literal['requirement', 'stage', 'task', 'event'] | None = None,
+def records(project_id: str, kind: Literal['requirement', 'stage', 'task', 'event', 'risk', 'policy'] | None = None,
             as_of: date | None = None, who: Identity = Depends(identity), session: Session = Depends(db.session_db)):
     project_access(project_id, session, who)
     # as_of is a deadline simulation date, never a claim to reconstruct past record versions.
@@ -58,7 +59,7 @@ def stage_template(project_id: str, who: Identity = Depends(identity), session: 
 @router.get('/api/projects/{project_id}/timeline')
 def timeline(project_id: str, basis: Literal['registered', 'source', 'confirmed'] = 'registered',
              start: date | None = None, end: date | None = None,
-             kind: Literal['document', 'requirement', 'stage', 'task', 'event', 'decision'] | None = None,
+             kind: Literal['document', 'requirement', 'stage', 'task', 'event', 'risk', 'policy', 'decision'] | None = None,
              stage_id: str | None = None, review: Literal['pending', 'accepted', 'rejected'] | None = None,
              limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
              who: Identity = Depends(identity), session: Session = Depends(db.session_db)):

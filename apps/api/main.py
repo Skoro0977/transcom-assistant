@@ -16,6 +16,7 @@ from .knowledge import router as knowledge_router
 from .lifecycle import router as lifecycle_router
 from .limits import BodySizeLimit
 from .planning import router as planning_router
+from .risks import router as risks_router
 from .search import router as search_router
 from .settings import ROOT, settings
 from .worker import start as start_worker
@@ -38,6 +39,7 @@ app.include_router(knowledge_router)
 app.include_router(lifecycle_router)
 app.include_router(search_router)
 app.include_router(planning_router)
+app.include_router(risks_router)
 
 
 @app.middleware('http')

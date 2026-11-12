@@ -483,3 +483,56 @@ def test_timeline_retains_every_receipt_of_identical_content(isolated, tmp_path,
     assert rows['total'] == 2
     period = client.get(base + '/timeline', params={'kind': 'document', 'start': '2024-02-01', 'end': '2024-02-01'}).json()
     assert period['total'] == 1 and period['items'][0]['version_id'] == first['version_id']
+
+
+def test_risk_patterns_human_review_and_business_day_reminders(isolated, tmp_path, monkeypatch):
+    from datetime import UTC, date, datetime
+
+    from apps.api.knowledge import PolicyData
+    from apps.api.risks import notify_due, reminder_at
+    from apps.api.search import index_version
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    base = '/api/projects/' + project
+    config = PolicyData(title='Правила', holidays=['2024-11-01'])
+    assert reminder_at(date(2024, 11, 4), config).isoformat() == '2024-10-31T09:00:00+03:00'
+    config.working_dates = [date(2024, 11, 2)]
+    assert reminder_at(date(2024, 11, 4), config).isoformat() == '2024-11-02T09:00:00+03:00'
+
+    def proposal(kind, data):
+        response = client.post(base + '/proposals', headers=headers, json={'kind': kind, 'data': data})
+        response.raise_for_status()
+        return response.json()
+
+    def accept(p):
+        response = client.post('/api/proposals/' + p['id'] + '/decision', headers=headers,
+            json={'decision': 'accepted', 'expected_version': 1})
+        response.raise_for_status()
+        return response.json()
+
+    accept(proposal('policy', {'title': 'Правила', 'pattern_rules': [{'name': 'Отказ', 'keywords': ['отказ'], 'priority': 'high'}]}))
+    source = client.post(base + '/documents', headers=headers, files={'file': ('letter.txt', 'Получен отказ в согласовании'.encode())}).json()
+    with db.SessionLocal() as session:
+        version = session.get(documents.DocumentVersion, source['version_id'])
+        version.text, version.status = 'Получен отказ в согласовании', 'ready'
+        version.segments = [{'text': version.text, 'locator': 'Текст', 'quoted': False}]
+        index_version(session, version)
+        session.commit()
+    risks = client.post(base + '/scan-risks', headers=headers).json()['items']
+    assert len(risks) == 1 and risks[0]['data']['priority'] == 'high' and risks[0]['evidence']
+    assert client.get(base + '/records?kind=risk').json() == []
+    assert client.post(base + '/scan-risks', headers=headers).json()['items'][0]['id'] == risks[0]['id']
+    accept(proposal('task', {'title': 'Контрольный срок', 'due_date': '2024-11-04'}))
+    assert notify_due(datetime(2024, 11, 1, 5, 59, tzinfo=UTC)) == 0
+    assert notify_due(datetime(2024, 11, 1, 6, 0, tzinfo=UTC)) == 15
+    assert notify_due(datetime(2024, 11, 1, 7, 0, tzinfo=UTC)) == 0
+    notices = client.get(base + '/notifications').json()
+    assert len(notices) == 1
+    other = client.post('/api/auth/login', json={k: accounts[-1][k] for k in ('username', 'password')}).json()
+    assert client.post('/api/notifications/' + notices[0]['id'] + '/read',
+        headers={'X-CSRF-Token': other['csrf_token']}).status_code == 404

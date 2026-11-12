@@ -53,7 +53,47 @@ class EventData(FactData):
     event_type: Literal['decision', 'correspondence', 'milestone', 'other'] = 'other'
 
 
-DATA_TYPES = {'requirement': FactData, 'stage': StageData, 'task': TaskData, 'event': EventData}
+class RiskData(FactData):
+    category: str = Field(default='Прочее', min_length=1, max_length=100)
+    priority: Literal['critical', 'high', 'medium', 'low'] = 'medium'
+    risk_state: Literal['open', 'mitigation', 'closed'] = 'open'
+    stage_id: str | None = Field(default=None, min_length=1, max_length=32)
+    requirement_id: str | None = Field(default=None, min_length=1, max_length=32)
+
+
+class PatternRule(InputModel):
+    name: str = Field(min_length=1, max_length=100)
+    keywords: list[str] = Field(min_length=1, max_length=10)
+    category: str = Field(default='Переписка', min_length=1, max_length=100)
+    priority: Literal['critical', 'high', 'medium', 'low'] = 'medium'
+    enabled: bool = True
+
+    @model_validator(mode='after')
+    def bounded_keywords(self):
+        self.keywords = list(dict.fromkeys(item.strip().lower() for item in self.keywords))
+        if any(not item or len(item) > 100 for item in self.keywords):
+            raise ValueError('Ключевое слово должно содержать от 1 до 100 символов')
+        return self
+
+
+class PolicyData(FactData):
+    pattern_rules: list[PatternRule] = Field(default_factory=list, max_length=30)
+    ai_instructions: str = Field(default='', max_length=4000)
+    required_categories: list[str] = Field(default_factory=list, max_length=20)
+    holidays: list[date] = Field(default_factory=list, max_length=200)
+    working_dates: list[date] = Field(default_factory=list, max_length=200)
+
+    @model_validator(mode='after')
+    def bounded_categories(self):
+        if any(not item.strip() or len(item) > 200 for item in self.required_categories):
+            raise ValueError('Категория документа должна содержать от 1 до 200 символов')
+        if len({rule.name.casefold() for rule in self.pattern_rules}) != len(self.pattern_rules):
+            raise ValueError('Названия паттернов не должны повторяться')
+        return self
+
+
+DATA_TYPES = {'requirement': FactData, 'stage': StageData, 'task': TaskData, 'event': EventData,
+              'risk': RiskData, 'policy': PolicyData}
 
 
 class Record(db.Base):
@@ -118,10 +158,10 @@ class Audit(db.Base):
 
 
 class ProposalInput(InputModel):
-    kind: Literal['requirement', 'stage', 'task', 'event'] = 'requirement'
+    kind: Literal['requirement', 'stage', 'task', 'event', 'risk', 'policy'] = 'requirement'
     target_id: str | None = Field(default=None, max_length=32)
     base_version: int = Field(default=0, ge=0)
-    data: FactData | StageData | TaskData | EventData
+    data: FactData | StageData | TaskData | EventData | RiskData | PolicyData
     conflict: bool = False
     note: str = Field(default='', max_length=4000)
 
@@ -161,6 +201,9 @@ def validate_target(session, project_id, body):
 
 
 def validate_links(session, project_id, kind, data, target_id=None):
+    if kind == 'policy' and session.scalar(select(Record.id).where(Record.project_id == project_id,
+            Record.kind == 'policy', Record.id != (target_id or ''))):
+        raise HTTPException(409, 'Правила уже существуют, предложите изменение их текущей редакции')
     links = [(data.get('stage_id'), 'stage'), (data.get('requirement_id'), 'requirement')]
     dependencies = data.get('depends_on', [])
     if len(set(dependencies)) != len(dependencies):

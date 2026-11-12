@@ -216,8 +216,14 @@ def start():
     stop = threading.Event()
 
     def loop():
+        from time import monotonic
+        last_reminders = 0.0
         while not stop.is_set():
             try:
+                if monotonic() - last_reminders >= 60:
+                    from .risks import notify_due
+                    notify_due()
+                    last_reminders = monotonic()
                 job_id = claim()
                 if job_id:
                     process(job_id)
