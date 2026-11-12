@@ -5,7 +5,7 @@ from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import Field
+from pydantic import Field, model_validator
 from sqlalchemy import (
     JSON,
     ForeignKey,
@@ -35,6 +35,25 @@ class FactData(InputModel):
     source_date: date | None = None
     owner: str = Field(default='', max_length=200)
     status: Literal['active', 'cancelled'] = 'active'
+
+
+class StageData(FactData):
+    stage_state: Literal['no_data', 'received', 'correction', 'customer_review', 'approved'] = 'no_data'
+
+
+class TaskData(FactData):
+    task_state: Literal['open', 'in_progress', 'blocked', 'done'] = 'open'
+    stage_id: str | None = Field(default=None, min_length=1, max_length=32)
+    requirement_id: str | None = Field(default=None, min_length=1, max_length=32)
+    depends_on: list[str] = Field(default_factory=list, max_length=20)
+
+
+class EventData(FactData):
+    stage_id: str | None = Field(default=None, min_length=1, max_length=32)
+    event_type: Literal['decision', 'correspondence', 'milestone', 'other'] = 'other'
+
+
+DATA_TYPES = {'requirement': FactData, 'stage': StageData, 'task': TaskData, 'event': EventData}
 
 
 class Record(db.Base):
@@ -99,12 +118,20 @@ class Audit(db.Base):
 
 
 class ProposalInput(InputModel):
-    kind: Literal['requirement'] = 'requirement'
+    kind: Literal['requirement', 'stage', 'task', 'event'] = 'requirement'
     target_id: str | None = Field(default=None, max_length=32)
     base_version: int = Field(default=0, ge=0)
-    data: FactData
+    data: FactData | StageData | TaskData | EventData
     conflict: bool = False
     note: str = Field(default='', max_length=4000)
+
+    @model_validator(mode='before')
+    @classmethod
+    def typed_data(cls, value):
+        if isinstance(value, dict) and value.get('kind', 'requirement') in DATA_TYPES:
+            value = dict(value)
+            value['data'] = DATA_TYPES[value.get('kind', 'requirement')].model_validate(value.get('data'))
+        return value
 
 
 class ProposalEdit(ProposalInput):
@@ -129,7 +156,32 @@ def validate_target(session, project_id, body):
         if target.version != body.base_version:
             raise HTTPException(409, 'Цель уже изменилась')
     elif body.base_version:
-        raise HTTPException(422, 'У нового требования нет базовой редакции')
+        raise HTTPException(422, 'У новой записи нет базовой редакции')
+    validate_links(session, project_id, body.kind, body.data.model_dump(mode='json'), body.target_id)
+
+
+def validate_links(session, project_id, kind, data, target_id=None):
+    links = [(data.get('stage_id'), 'stage'), (data.get('requirement_id'), 'requirement')]
+    dependencies = data.get('depends_on', [])
+    if len(set(dependencies)) != len(dependencies):
+        raise HTTPException(422, 'Зависимости не должны повторяться')
+    links += [(item, 'task') for item in dependencies]
+    for key, expected_kind in links:
+        if not key:
+            continue
+        record = session.get(Record, key)
+        if not record or record.project_id != project_id or record.kind != expected_kind:
+            raise HTTPException(422, 'Связанная запись недоступна в этом проекте')
+    if kind == 'task' and target_id:
+        visited, queue = set(), list(dependencies)
+        while queue:
+            key = queue.pop()
+            if key == target_id:
+                raise HTTPException(422, 'Циклическая зависимость задач')
+            if key not in visited:
+                visited.add(key)
+                record = session.get(Record, key)
+                queue.extend(current(session, record).data.get('depends_on', []))
 
 
 def fingerprint_for(body, evidence, source_id, source_epoch=0):
@@ -190,7 +242,8 @@ def decide(session, proposal, body, user_id):
             session.flush()
             proposal.target_id = record.id
             number = 1
-        data = FactData.model_validate(proposal.data).model_dump(mode='json')
+        data = DATA_TYPES[proposal.kind].model_validate(proposal.data).model_dump(mode='json')
+        validate_links(session, proposal.project_id, proposal.kind, data, record.id)
         revision = Revision(record_id=record.id, project_id=proposal.project_id, number=number,
                             data=data, evidence=proposal.evidence, author_id=user_id, reason=body.reason)
         session.add(revision)
@@ -218,6 +271,8 @@ def edit_proposal(proposal_id: str, body: ProposalEdit, who: Identity = Depends(
     if not proposal:
         raise HTTPException(404, 'Предложение не найдено')
     project_access(proposal.project_id, session, who, 'edit')
+    if body.kind != proposal.kind:
+        raise HTTPException(422, 'Вид предложения нельзя менять')
     validate_target(session, proposal.project_id, body)
     fingerprint = fingerprint_for(body, proposal.evidence, proposal.source_version_id, proposal.source_document_version)
     existing = session.scalar(select(Proposal).where(Proposal.project_id == proposal.project_id,

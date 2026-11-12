@@ -421,3 +421,65 @@ def test_search_respects_versions_acl_archive_and_purge_during_embedding(isolate
         assert not list(session.scalars(select(Chunk)))
     client.post('/api/auth/login', json={k: accounts[-1][k] for k in ('username', 'password')})
     assert client.get(url + '/search', params={'q': 'давление', 'semantic': False}).status_code == 404
+
+
+def test_planning_typed_links_cycles_and_deadline_simulation(isolated):
+    client, accounts = isolated
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    base = '/api/projects/' + project
+
+    def accept(kind, data, target=None):
+        response = client.post(base + '/proposals', headers=headers, json={'kind': kind, 'data': data,
+            'target_id': target, 'base_version': 1 if target else 0})
+        response.raise_for_status()
+        proposal = response.json()
+        result = client.post('/api/proposals/' + proposal['id'] + '/decision', headers=headers,
+            json={'decision': 'accepted', 'expected_version': 1})
+        result.raise_for_status()
+        return result.json()['target_id']
+
+    stage = accept('stage', {'title': 'Трасса', 'stage_state': 'correction'})
+    task1 = accept('task', {'title': 'Проверить трассу', 'stage_id': stage, 'due_date': '2024-11-01'})
+    task2 = accept('task', {'title': 'Согласовать трассу', 'depends_on': [task1]})
+    cycle = client.post(base + '/proposals', headers=headers, json={'kind': 'task', 'target_id': task1,
+        'base_version': 1, 'data': {'title': 'Неверный цикл', 'depends_on': [task2]}})
+    assert cycle.status_code == 422
+    wrong_kind = client.post(base + '/proposals', headers=headers, json={'kind': 'requirement',
+        'data': {'title': 'Неверное поле', 'task_state': 'done'}})
+    assert wrong_kind.status_code == 422
+    tasks = client.get(base + '/records', params={'kind': 'task', 'as_of': '2024-10-01'}).json()
+    assert next(r for r in tasks if r['id'] == task1)['deadline'] == 'planned'
+    tasks = client.get(base + '/records', params={'kind': 'task', 'as_of': '2024-11-02'}).json()
+    assert next(r for r in tasks if r['id'] == task1)['deadline'] == 'overdue'
+    rows = client.get(base + '/timeline', params={'stage_id': stage, 'kind': 'task', 'review': 'accepted'}).json()
+    assert rows['total'] == 1 and rows['items'][0]['title'] == 'Проверить трассу'
+    other = client.post('/api/projects', json={'title': 'Другой объект'}, headers=headers).json()['id']
+    assert client.post('/api/projects/' + other + '/proposals', headers=headers,
+        json={'kind': 'task', 'data': {'title': 'Чужая связь', 'stage_id': stage}}).status_code == 422
+
+
+def test_timeline_retains_every_receipt_of_identical_content(isolated, tmp_path, monkeypatch):
+    from sqlalchemy import select
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    base = '/api/projects/' + project
+    first = client.post(base + '/documents', files={'file': ('first.txt', b'receipt-test')}, headers=headers).json()
+    again = client.post(base + '/documents', files={'file': ('again.txt', b'receipt-test')}, headers=headers).json()
+    assert first['version_id'] == again['version_id']
+    with db.SessionLocal() as session:
+        receipts = list(session.scalars(select(documents.Occurrence).where(documents.Occurrence.version_id == first['version_id'])))
+        assert len(receipts) == 2
+        receipts[0].received_at = '2024-01-01T12:00:00+00:00'
+        receipts[1].received_at = '2024-02-01T12:00:00+00:00'
+        session.commit()
+    rows = client.get(base + '/timeline', params={'kind': 'document'}).json()
+    assert rows['total'] == 2
+    period = client.get(base + '/timeline', params={'kind': 'document', 'start': '2024-02-01', 'end': '2024-02-01'}).json()
+    assert period['total'] == 1 and period['items'][0]['version_id'] == first['version_id']

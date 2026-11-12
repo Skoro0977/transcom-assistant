@@ -134,10 +134,11 @@ def index_version(session, version):
 
 def index_revision(session, revision):
     data = revision.data
-    text = '\n'.join(str(data.get(k) or '') for k in ('title', 'text', 'scope', 'owner', 'due_date'))
+    record = session.get(Record, revision.record_id)
+    text = '\n'.join(str(data.get(k) or '') for k in ('title', 'text', 'scope', 'owner', 'due_date', 'stage_state', 'task_state'))
     text += '\nСостояние: ' + ('Отменено' if data.get('status') == 'cancelled' else 'Действует')
     return build_chunks(session, revision.project_id, revision.id, 'revision',
-        [{'text': text, 'locator': f'Подтвержденное требование, редакция {revision.number}', 'quoted': False}],
+        [{'text': text, 'locator': f'Подтвержденная запись ({record.kind}), редакция {revision.number}', 'quoted': False}],
         revision.created_at, data.get('source_date'))
 
 

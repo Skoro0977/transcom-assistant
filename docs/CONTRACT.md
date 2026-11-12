@@ -8,7 +8,7 @@
 
 - Обработка документа: queued, parsing, ready, needs_preparation, failed.
 - Проверка предложения: pending, accepted, rejected. Отмена принятого решения создает следующую редакцию.
-- Рабочий статус этапа: received, correction, customer_review, approved. Параллельные этапы и возвращение допустимы.
+- Рабочий статус этапа: no_data, received, correction, customer_review, approved. Параллельные этапы и возвращение допустимы.
 - Документ: active, archived, purged. Purged является окончательным удалением содержимого с предупреждением и повторным подтверждением.
 - Риск имеет отдельные category, priority и status. Цвет не является состоянием проверки.
 
@@ -30,7 +30,8 @@ User связан с Project через Membership. Каждый проект с
 | /api/projects/{id}/proposals | Очередь проверки, фильтры |
 | /api/proposals/{id}/decision | Решение с expected_version и ключом идемпотентности |
 | /api/projects/{id}/decisions | Выбранный набор без противоречий; ID и expected_version для каждого элемента |
-| /api/projects/{id}/requirements, /events, /tasks, /stages, /risks | Предметные данные, редактирование через предложения |
+| /api/projects/{id}/requirements, /records?kind=, /timeline | Принятые предметные данные и события, редактирование через предложения |
+| /api/projects/{id}/stage-template | Семь предложений названий этапов, без автоматического принятия |
 | /api/projects/{id}/search, /chat, /summary, /report | Поиск, вопросы, сводка и DOCX |
 | /api/projects/{id}/sources | Контроль папки, почты и входящих API |
 | /api/documents/{id}/archive, /purge-challenge, /purge | Исключение, предупреждение и окончательное подтверждение |
