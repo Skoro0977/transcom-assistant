@@ -229,9 +229,9 @@ def retrieve(session, project_id, query, mode='current', start=None, end=None, b
             search = search.where(Chunk.source_date <= end.isoformat())
     else:
         moscow = timezone(timedelta(hours=3))
-        if start:
+        if start and start != date.min:
             search = search.where(Chunk.recorded_at >= datetime.combine(start, time.min, moscow).astimezone(UTC).isoformat())
-        if end:
+        if end and end != date.max:
             search = search.where(Chunk.recorded_at < datetime.combine(end + timedelta(days=1), time.min, moscow).astimezone(UTC).isoformat())
     warning, vector = '', None
     ready = session.scalar(select(func.count()).select_from(search.where(Chunk.state == 'ready',

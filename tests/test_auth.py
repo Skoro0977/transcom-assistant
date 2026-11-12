@@ -536,3 +536,55 @@ def test_risk_patterns_human_review_and_business_day_reminders(isolated, tmp_pat
     other = client.post('/api/auth/login', json={k: accounts[-1][k] for k in ('username', 'password')}).json()
     assert client.post('/api/notifications/' + notices[0]['id'] + '/read',
         headers={'X-CSRF-Token': other['csrf_token']}).status_code == 404
+
+
+def test_chat_purge_late_response_and_summary_dates(isolated, tmp_path, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    from apps.api.assistant import giga
+    from apps.api.knowledge import Proposal, Revision
+    from apps.api.search import index_version
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    base = '/api/projects/' + project
+    source = client.post(base + '/documents', headers=headers, files={'file': ('grounding.txt', 'Тестовое давление 0.3 МПа'.encode())}).json()
+    with db.SessionLocal() as session:
+        version = session.get(documents.DocumentVersion, source['version_id'])
+        version.text, version.status = 'Тестовое давление 0.3 МПа', 'ready'
+        version.segments = [{'text': version.text, 'locator': 'Тест', 'quoted': False}]
+        index_version(session, version)
+        session.commit()
+    local = client.post(base + '/chat', json={'text': 'давление', 'use_ai': False}, headers=headers)
+    assert local.status_code == 200 and local.json()['citations'][0]['reference'] == 1
+    p = client.post(base + '/proposals', headers=headers, json={'kind': 'task',
+        'data': {'title': 'Тестовая задача', 'due_date': '2024-11-04'}}).json()
+    assert client.post('/api/proposals/' + p['id'] + '/decision', headers=headers,
+        json={'decision': 'accepted', 'expected_version': 1}).status_code == 200
+    with db.SessionLocal() as session:
+        proposal = session.get(Proposal, p['id'])
+        proposal.created_at, proposal.decided_at = '2024-01-01T12:00:00+00:00', '2024-02-01T12:00:00+00:00'
+        revision = session.scalar(select(Revision).where(Revision.record_id == proposal.target_id))
+        revision.created_at = proposal.decided_at
+        session.commit()
+    params = {'start': '2024-01-01', 'end': '2024-01-01'}
+    assert len(client.get(base + '/summary', params=params).json()['changes']) == 1
+    assert client.get(base + '/summary', params=dict(params, basis='confirmed')).json()['changes'] == []
+
+    def removed_while_answering(*args, **kwargs):
+        path = '/api/documents/' + source['id']
+        client.post(path + '/archive', json={'expected_version': 1, 'state': 'archived'}, headers=headers).raise_for_status()
+        token = client.post(path + '/purge-challenge', json={'expected_version': 2}, headers=headers).json()['token']
+        client.post(path + '/purge', json={'expected_version': 2, 'token': token, 'confirmation': 'УДАЛИТЬ'}, headers=headers).raise_for_status()
+        return json.dumps({'answer': 'Запоздалый ответ 0.3 МПа', 'references': [], 'insufficient': True})
+    monkeypatch.setattr(giga, 'chat', removed_while_answering)
+    late = client.post(base + '/chat', json={'text': 'давление', 'use_ai': True}, headers=headers)
+    assert late.status_code == 409
+    history = client.get(base + '/chat').json()
+    assert len(history) == 1 and history[0]['citations'] == [] and '0.3' not in history[0]['answer']

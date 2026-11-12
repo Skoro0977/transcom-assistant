@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .assistant import router as assistant_router
 from .auth import Identity, identity, project_access, public_user
 from .auth import router as auth_router
 from .contracts import ProjectInput
@@ -40,6 +41,7 @@ app.include_router(lifecycle_router)
 app.include_router(search_router)
 app.include_router(planning_router)
 app.include_router(risks_router)
+app.include_router(assistant_router)
 
 
 @app.middleware('http')

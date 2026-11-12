@@ -207,6 +207,12 @@ def purge(document_id: str, body: PurgeInput, who: Identity = Depends(identity),
         if any(e.get('version_id') in ids for e in revision.evidence):
             revision.evidence = [dict(e, quote='', locator='Удаленный источник', removed=True)
                                  if e.get('version_id') in ids else e for e in revision.evidence]
+    from .assistant import ChatTurn
+    for turn in session.scalars(select(ChatTurn).where(ChatTurn.project_id == document.project_id)):
+        if set(turn.source_ids) & ids:
+            turn.answer, turn.citations = 'Основание ответа окончательно удалено.', []
+            turn.source_ids = []
+            turn.notice = 'Повторите вопрос по оставшимся источникам.'
     document.lifecycle, document.version = 'purged', document.version + 1
     document.title, document.category = 'Удаленный документ', ''
     session.execute(delete(PurgeChallenge).where(PurgeChallenge.document_id == document_id))
