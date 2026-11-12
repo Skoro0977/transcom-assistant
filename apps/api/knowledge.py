@@ -191,8 +191,12 @@ def decide(session, proposal, body, user_id):
             proposal.target_id = record.id
             number = 1
         data = FactData.model_validate(proposal.data).model_dump(mode='json')
-        session.add(Revision(record_id=record.id, project_id=proposal.project_id, number=number,
-            data=data, evidence=proposal.evidence, author_id=user_id, reason=body.reason))
+        revision = Revision(record_id=record.id, project_id=proposal.project_id, number=number,
+                            data=data, evidence=proposal.evidence, author_id=user_id, reason=body.reason)
+        session.add(revision)
+        session.flush()
+        from .search import index_revision
+        index_revision(session, revision)
     session.add(Audit(project_id=proposal.project_id, user_id=user_id, action='proposal_' + body.decision,
         entity_id=proposal.id, details={'target_id': proposal.target_id, 'base_version': proposal.base_version}))
 

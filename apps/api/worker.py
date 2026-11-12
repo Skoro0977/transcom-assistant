@@ -137,6 +137,8 @@ def process(job_id):
             version.metadata_json = result['metadata']
             version.warning = result['warning']
             version.status = result['status']
+            from .search import index_version
+            index_version(session, version)
             if version.number > 1 and version.text:
                 analysis = session.scalar(select(Job).where(Job.version_id == version.id, Job.kind == 'analyze'))
                 if analysis is None:
@@ -220,7 +222,9 @@ def start():
                 if job_id:
                     process(job_id)
                 else:
-                    stop.wait(1)
+                    from .search import embed_next
+                    if not embed_next():
+                        stop.wait(1)
             except Exception:
                 logger.exception('Worker iteration failed')
                 stop.wait(3)

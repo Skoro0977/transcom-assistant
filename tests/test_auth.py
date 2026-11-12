@@ -182,6 +182,9 @@ def test_decisions_are_atomic_versioned_and_individual_for_conflicts(isolated):
     history = client.get('/api/records/' + record['id'] + '/history').json()
     assert [r['number'] for r in history] == [1, 2]
     assert history[1]['changes']['due_date'] == {'before': '2026-11-20', 'after': '2026-11-21'}
+    current_hits = client.get('/api/projects/' + project + '/search', params={'q': 'съемку', 'semantic': False}).json()
+    historical_hits = client.get('/api/projects/' + project + '/search', params={'q': 'съемку', 'semantic': False, 'mode': 'history'}).json()
+    assert len(current_hits['items']) == 1 and len(historical_hits['items']) == 2
     with db.SessionLocal() as session:
         from sqlalchemy import select
 
@@ -365,3 +368,56 @@ def test_stale_workers_cannot_restore_purged_contents(isolated, tmp_path, monkey
     with db.SessionLocal() as session:
         assert session.get(documents.DocumentVersion, second['version_id']).text == ''
         assert not list(session.scalars(select(Proposal).where(Proposal.status == 'pending')))
+
+
+def test_search_respects_versions_acl_archive_and_purge_during_embedding(isolated, tmp_path, monkeypatch):
+    from sqlalchemy import select
+
+    from apps.api.search import Chunk, embed_next, giga, index_version
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    monkeypatch.setattr(settings, 'gigachat_bulk_indexing_enabled', True)
+    monkeypatch.setattr(giga, 'embeddings', lambda texts: [[1.0, 0.0] if '0.3' in text else [0.0, 1.0] for text in texts])
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.post('/api/projects', json={'title': 'Синтетический поиск'}, headers=headers).json()['id']
+    url = '/api/projects/' + project
+    item = client.post(url + '/documents', files={'file': ('source.txt', b'first')}, headers=headers).json()
+    newer = client.post(url + '/documents', params={'document_id': item['id'], 'expected_version': 1},
+        files={'file': ('source-v2.txt', b'second')}, headers=headers).json()
+    with db.SessionLocal() as session:
+        for key, text in [(item['version_id'], 'Давление газа 0.3 МПа'), (newer['version_id'], 'Давление газа 0.6 МПа')]:
+            version = session.get(documents.DocumentVersion, key)
+            version.text, version.status = text, 'ready'
+            version.segments = [{'text': text, 'locator': 'Тестовый текст', 'quoted': False}]
+            index_version(session, version)
+        session.commit()
+    assert embed_next()
+    assert client.get(url + '/search', params={'q': 'давление', 'semantic': False}).json()['items'][0]['number'] == 2
+    history = client.get(url + '/search', params={'q': 'давление', 'semantic': False, 'mode': 'history'}).json()
+    assert len(history['items']) == 2
+    semantic = client.get(url + '/search', params={'q': 'смысловой запрос', 'semantic': True, 'mode': 'history'}).json()
+    assert len(semantic['items']) == 1 and semantic['items'][0]['number'] == 2
+    base = '/api/documents/' + item['id']
+    assert client.post(base + '/archive', json={'state': 'archived', 'expected_version': 2}, headers=headers).status_code == 200
+    assert client.get(url + '/search', params={'q': 'давление', 'semantic': False}).json()['items'] == []
+    assert client.post(base + '/archive', json={'state': 'active', 'expected_version': 3}, headers=headers).status_code == 200
+    with db.SessionLocal() as session:
+        chunk = session.scalar(select(Chunk).where(Chunk.document_version_id == newer['version_id']))
+        chunk.state = 'pending'
+        session.commit()
+
+    def deleted_during_embedding(texts):
+        client.post(base + '/archive', json={'state': 'archived', 'expected_version': 4}, headers=headers).raise_for_status()
+        token = client.post(base + '/purge-challenge', json={'expected_version': 5}, headers=headers).json()['token']
+        client.post(base + '/purge', json={'expected_version': 5, 'token': token, 'confirmation': 'УДАЛИТЬ'}, headers=headers).raise_for_status()
+        return [[0.0, 1.0] for _ in texts]
+
+    monkeypatch.setattr(giga, 'embeddings', deleted_during_embedding)
+    assert embed_next()
+    with db.SessionLocal() as session:
+        assert not list(session.scalars(select(Chunk)))
+    client.post('/api/auth/login', json={k: accounts[-1][k] for k in ('username', 'password')})
+    assert client.get(url + '/search', params={'q': 'давление', 'semantic': False}).status_code == 404

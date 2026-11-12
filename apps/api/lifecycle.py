@@ -12,6 +12,7 @@ from . import db
 from .auth import Identity, digest, identity, project_access
 from .documents import Document, DocumentVersion, Job, ReparseInput, accessible_document, blob_path
 from .knowledge import Audit, FactData, Proposal, Record, Revision
+from .search import Chunk
 from .worker import AttachmentLink
 
 router = APIRouter(tags=['history'])
@@ -125,11 +126,15 @@ def archive(document_id: str, body: ArchiveInput, who: Identity = Depends(identi
     document.lifecycle, document.version = body.state, document.version + 1
     version_ids = select(DocumentVersion.id).where(DocumentVersion.document_id == document_id)
     if body.state == 'archived':
+        session.execute(update(Chunk).where(Chunk.document_version_id.in_(version_ids),
+                        Chunk.state.in_(['pending', 'running'])).values(state='paused', updated_at=db.utcnow()))
         session.execute(update(Job).where(Job.version_id.in_(version_ids), Job.status.in_(['queued', 'running']))
                         .values(status='cancelled'))
         session.execute(update(Proposal).where(Proposal.source_version_id.in_(version_ids), Proposal.status == 'pending')
                         .values(status='rejected', reason='Источник исключен из работы', version=Proposal.version + 1))
     else:
+        session.execute(update(Chunk).where(Chunk.document_version_id.in_(version_ids), Chunk.state == 'paused')
+                        .values(state='pending', attempts=0, error='', updated_at=db.utcnow()))
         cancelled_parse = list(session.scalars(select(Job).where(Job.version_id.in_(version_ids),
             Job.kind == 'parse', Job.status == 'cancelled')))
         for job in cancelled_parse:
@@ -177,6 +182,7 @@ def purge(document_id: str, body: PurgeInput, who: Identity = Depends(identity),
         raise HTTPException(409, 'Подтверждение недействительно, повторите предупреждение')
     versions = list(session.scalars(select(DocumentVersion).where(DocumentVersion.document_id == document_id)))
     ids = {v.id for v in versions}
+    session.execute(delete(Chunk).where(Chunk.document_version_id.in_(ids)))
     for version in versions:
         if not session.scalar(select(PurgedContent).where(PurgedContent.project_id == document.project_id,
                                                         PurgedContent.sha256 == version.sha256)):

@@ -13,3 +13,6 @@
 - https://developers.sber.ru/docs/ru/gigachat/api/reference/rest/post-embeddings
 - https://developers.sber.ru/docs/ru/gigachat/certificates
 - https://developers.sber.ru/docs/ru/gigachat/guides/structured-output
+- https://developers.sber.ru/docs/ru/gigachat/models/embeddings-giga-r
+
+Для смыслового индекса используется EmbeddingsGigaR: официальная спецификация указывает4096 токенов и2560 координат. Тексты фрагментов ограничены1400 символами и3500 UTF-8 байтами. Векторы нормализуются и сохраняются float32 в SQLite вместе с моделью и размерностью. Исходный корпус не уходит в сеть при локальном разбиении. Массовая облачная индексация отдельно включается GIGACHAT_BULK_INDEXING_ENABLED=true после разрешения на передачу корпуса, по умолчанию false. Ключ и готовые векторы остаются на D.
