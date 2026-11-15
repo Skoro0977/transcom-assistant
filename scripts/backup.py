@@ -13,17 +13,18 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-ROOT = Path(__file__).resolve().parents[1]
+from apps.api.paths import ROOT, is_storage_path
+
 MAX_TOTAL = 20 * 1024 ** 3
 MAX_FILES = 50000
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
-def on_d(path):
+def on_storage(path):
     path = Path(path).absolute()
     resolved = path.resolve()
-    if resolved != path or (os.name == 'nt' and resolved.drive.upper() != 'D:'):
-        raise ValueError('Путь должен находиться на D и не перенаправляться ссылкой')
+    if resolved != path or not is_storage_path(resolved):
+        raise ValueError('Путь должен находиться на диске проекта и не перенаправляться ссылкой')
     return resolved
 
 
@@ -72,17 +73,17 @@ def database_check(path, blob_root=None):
 
 def create_backup(project=ROOT, output=None):
     offline()
-    project = on_d(project)
-    data = on_d(project / 'data')
+    project = on_storage(project)
+    data = on_storage(project / 'data')
     source_db = regular(data / 'transcom.db', data)
-    output = on_d(output or data / 'local' / 'backups')
+    output = on_storage(output or data / 'local' / 'backups')
     if output.is_relative_to(data) and not output.is_relative_to(data / 'local' / 'backups'):
         raise ValueError('Внутри данных копии сохраняются только в data/local/backups')
     if output.exists() and not output.is_relative_to(data / 'local' / 'backups'):
-        raise ValueError('Для внешней папки копий выберите новую папку на D')
+        raise ValueError('Для внешней папки копий выберите новую папку на диске проекта')
     output.mkdir(parents=True, exist_ok=True)
     private(output)
-    temporary_root = on_d(data / 'tmp')
+    temporary_root = on_storage(data / 'tmp')
     temporary_root.mkdir(exist_ok=True)
     stamp = datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')
     target = output / ('transcom-' + stamp + '.zip')
@@ -172,7 +173,7 @@ def archive_name(name):
 
 
 def restore_backup(archive_path, destination, expected_sha256):
-    archive_path, destination = on_d(archive_path), on_d(destination)
+    archive_path, destination = on_storage(archive_path), on_storage(destination)
     if destination.exists():
         raise ValueError('Восстановление разрешено только в новую, еще не существующую папку')
     if not re_checksum(expected_sha256) or digest_file(archive_path) != expected_sha256:
@@ -239,7 +240,7 @@ def re_checksum(value):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Проверенная копия и восстановление только на D')
+    parser = argparse.ArgumentParser(description='Проверенная копия и восстановление на настроенном локальном диске')
     sub = parser.add_subparsers(dest='operation', required=True)
     create = sub.add_parser('create')
     create.add_argument('--output', type=Path)

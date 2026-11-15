@@ -59,11 +59,14 @@ def test_sessions_csrf_origin_and_project_access(isolated):
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Windows disk policy')
-def test_sqlite_drivers_cannot_write_to_c():
-    for url in ['sqlite:///C:/transcom.db', 'sqlite+pysqlite:///C:/transcom.db',
-                'sqlite:///file:C:/transcom.db?uri=true']:
+def test_sqlite_drivers_reject_other_drives_relative_paths_and_uri():
+    from apps.api.paths import STORAGE_DRIVE
+    other = 'C:' if STORAGE_DRIVE != 'C:' else 'D:'
+    for url in [f'sqlite:///{other}/transcom.db', f'sqlite+pysqlite:///{other}/transcom.db',
+                f'sqlite:///file:{STORAGE_DRIVE}/transcom.db?uri=true', 'sqlite:///relative.db']:
         with pytest.raises(RuntimeError):
             validate_database_location(url)
+    validate_database_location(f'sqlite:///{STORAGE_DRIVE}/transcom.db')
 
 
 def test_upload_duplicates_versions_and_private_files(isolated, tmp_path, monkeypatch):

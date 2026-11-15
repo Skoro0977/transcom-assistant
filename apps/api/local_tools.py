@@ -7,13 +7,14 @@ from contextlib import closing
 from itertools import pairwise
 from pathlib import Path
 
+from .paths import is_storage_path
 from .settings import DATA, ROOT, settings
 
 
 def executable(value):
     path = Path(value).resolve()
-    if not path.is_file() or (os.name == 'nt' and path.drive.upper() != 'D:'):
-        raise ValueError('Local tool must exist on D')
+    if not path.is_file() or not is_storage_path(path):
+        raise ValueError('Local tool must exist on the configured local drive')
     return path
 
 

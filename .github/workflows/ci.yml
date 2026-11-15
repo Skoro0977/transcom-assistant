@@ -24,3 +24,43 @@ jobs:
         working-directory: tools/ocr
       - run: python -B -m alembic upgrade head && python -B -m alembic check
       - run: python -B -m pytest tests --basetemp "$RUNNER_TEMP/transcom-pytest"
+
+  windows-portable:
+    runs-on: windows-latest
+    env:
+      TRANSCOM_PORTABLE: 'true'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Copy committed source into a fresh C drive folder with spaces
+        shell: pwsh
+        run: |
+          $target = 'C:\Transcom CI\project'
+          if (Test-Path -LiteralPath $target) { throw 'CI target must be new' }
+          $archive = Join-Path $env:RUNNER_TEMP 'transcom-source.zip'
+          git archive --format=zip --output $archive HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $target
+      - name: Install with Windows PowerShell 5.1
+        working-directory: 'C:\Transcom CI\project'
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Portable
+      - name: Check Python, migrations and critical invariants on C
+        working-directory: 'C:\Transcom CI\project'
+        run: |
+          . .\scripts\dev-env.ps1 -Portable
+          if ((Get-Location).Drive.Name -ne 'C') { throw 'Portable acceptance must execute on C' }
+          & .\.venv\Scripts\python.exe -B -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency check failed' }
+          & .\.venv\Scripts\python.exe -B -m ruff check apps/api scripts tests migrations/env.py
+          if ($LASTEXITCODE -ne 0) { throw 'Ruff failed' }
+          & .\.venv\Scripts\python.exe -B -m alembic upgrade head
+          if ($LASTEXITCODE -ne 0) { throw 'Migration failed' }
+          & .\.venv\Scripts\python.exe -B -m alembic check
+          if ($LASTEXITCODE -ne 0) { throw 'Migration check failed' }
+          & .\.venv\Scripts\python.exe -B -m pytest tests --basetemp (Join-Path $env:TEMP 'pytest-windows')
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+      - name: Start application and authenticate with a browser Origin on C
+        working-directory: 'C:\Transcom CI\project'
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-windows.ps1

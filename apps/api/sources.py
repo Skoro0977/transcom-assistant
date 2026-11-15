@@ -22,6 +22,7 @@ from . import db, vault
 from .auth import Identity, identity, project_access
 from .contracts import InputModel
 from .documents import EXTENSIONS, MAX_BYTES, Document, ingest
+from .paths import is_storage_path
 from .settings import DATA
 
 router = APIRouter(tags=['sources'])
@@ -98,7 +99,7 @@ class SourceEdit(SourceInput):
 def inbox_path(project_id):
     requested = (INBOX / project_id).absolute()
     root = requested.resolve()
-    if root != requested or (os.name == 'nt' and root.drive.upper() != 'D:'):
+    if root != requested or not is_storage_path(root):
         raise HTTPException(422, 'Входящая папка проекта не должна перенаправляться ссылкой в другой каталог')
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -110,8 +111,8 @@ def folder_path(project_id, raw=''):
     if not path.is_absolute():
         path = root / path
     path = path.resolve()
-    if not path.is_relative_to(root) or (os.name == 'nt' and path.drive.upper() != 'D:'):
-        raise HTTPException(422, 'Папка должна находиться внутри входящей папки этого проекта на D')
+    if not path.is_relative_to(root) or not is_storage_path(path):
+        raise HTTPException(422, 'Папка должна находиться внутри входящей папки этого проекта')
     return path
 
 

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import httpx
 
+from .paths import is_storage_path
 from .settings import settings
 
 API = 'https://api.giga.chat/v1'
@@ -29,8 +30,8 @@ class GigaChat:
             context = ssl.create_default_context()
             if settings.gigachat_ca_file:
                 path = Path(settings.gigachat_ca_file).resolve()
-                if path.drive and path.drive.upper() != 'D:':
-                    raise ProviderError('Сертификат приложения должен находиться на D')
+                if not is_storage_path(path):
+                    raise ProviderError('Сертификат приложения должен находиться на диске проекта')
                 context.load_verify_locations(cafile=str(path))
             with httpx.Client(verify=context, trust_env=False, follow_redirects=False,
                               timeout=httpx.Timeout(60, connect=10)) as client, \
