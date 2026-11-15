@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
@@ -15,6 +16,7 @@ from apps.api.settings import settings, validate_database_location
 @pytest.fixture
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'worker_enabled', False)
+    monkeypatch.setattr(settings, 'gigachat_auth_key', SecretStr(''))
     engine = create_engine('sqlite:///' + str(tmp_path / 'auth.db'),
                            connect_args={'check_same_thread': False})
 
@@ -388,6 +390,7 @@ def test_search_respects_versions_acl_archive_and_purge_during_embedding(isolate
     storage.mkdir()
     monkeypatch.setattr(documents, 'BLOBS', storage)
     monkeypatch.setattr(settings, 'gigachat_bulk_indexing_enabled', True)
+    monkeypatch.setattr(settings, 'gigachat_auth_key', SecretStr('synthetic-test-key'))
     monkeypatch.setattr(giga, 'embeddings', lambda texts: [[1.0, 0.0] if '0.3' in text else [0.0, 1.0] for text in texts])
     login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
     headers = {'X-CSRF-Token': login['csrf_token']}

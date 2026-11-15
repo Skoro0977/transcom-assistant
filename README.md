@@ -59,4 +59,4 @@ npm --prefix apps/web run build
 - [GigaChat](docs/GIGACHAT.md), [папка и почта](docs/SOURCES.md), [Telegram, ВК и API](docs/INTEGRATIONS.md).
 - [Порядок задач](TASKS.md), [журнал решений и проверок](docs/WORK_LOG.md), [независимые ревью](docs/reviews).
 
-Локальный Git готов. GitHub ожидает вход владельца; удаленный репозиторий и приглашение коллеге еще не созданы. Внешний сервер пользователь предоставит позднее. Текущий запуск слушает только 127.0.0.1. Для внешнего размещения нужны HTTPS, точный ALLOWED_ORIGINS и COOKIE_SECURE=true.
+Код и история разработки загружены в закрытый репозиторий [Skoro0977/transcom-assistant](https://github.com/Skoro0977/transcom-assistant), основная ветка main. GitHub Actions выполняет проверки при push и PR. Логин коллеги для приглашения и внешний сервер пользователь предоставит позднее. Текущий запуск слушает только 127.0.0.1. Для внешнего размещения нужны HTTPS, точный ALLOWED_ORIGINS и COOKIE_SECURE=true.
