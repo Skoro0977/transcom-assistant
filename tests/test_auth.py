@@ -553,6 +553,114 @@ def test_risk_patterns_human_review_and_business_day_reminders(isolated, tmp_pat
         headers={'X-CSRF-Token': other['csrf_token']}).status_code == 404
 
 
+def test_current_chat_includes_confirmed_deadline_for_general_question(isolated, tmp_path, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    from apps.api.assistant import giga
+    from apps.api.knowledge import Revision
+    from apps.api.search import index_version
+
+    client, accounts = isolated
+    storage = tmp_path / 'blobs'
+    storage.mkdir()
+    monkeypatch.setattr(documents, 'BLOBS', storage)
+    login = client.post('/api/auth/login', json={k: accounts[0][k] for k in ('username', 'password')}).json()
+    headers = {'X-CSRF-Token': login['csrf_token']}
+    project = client.get('/api/projects').json()[0]['id']
+    base = '/api/projects/' + project
+    original = 'Текущий срок поручения по геодезической съемке в искусственном примере: 05.12.2026.'
+
+    def upload_plan(text, params=None):
+        uploaded = client.post(base + '/documents', params=params, headers=headers,
+                               files={'file': ('plan.txt', text.encode())})
+        assert uploaded.status_code == 201
+        source = uploaded.json()
+        with db.SessionLocal() as session:
+            version = session.get(documents.DocumentVersion, source['version_id'])
+            version.text, version.status = text, 'ready'
+            version.segments = [{'text': text, 'locator': 'План', 'quoted': False}]
+            index_version(session, version)
+            session.commit()
+        return source
+
+    def confirm_deadline(due_date, title='Геодезическая съемка', **target):
+        proposal = client.post(base + '/proposals', headers=headers, json={
+            'data': {'title': title, 'due_date': due_date}, **target,
+        })
+        assert proposal.status_code == 201
+        assert client.post('/api/proposals/' + proposal.json()['id'] + '/decision', headers=headers,
+            json={'decision': 'accepted', 'expected_version': 1}).status_code == 200
+
+    source = upload_plan(original)
+    confirm_deadline('2026-12-05')
+    record = client.get(base + '/requirements').json()[0]
+    confirm_deadline('2026-12-07', target_id=record['id'], base_version=1)
+
+    question = 'Какой текущий срок поручения в искусственном примере?'
+    observed = []
+
+    def fake_chat(_system, payload, **_options):
+        context = json.loads(payload)
+        found = context['sources']
+        observed.extend(found)
+        confirmed = next((item for item in found if item['kind'] == 'accepted'), None)
+        assert context['confirmed_deadlines'] == [{'title': 'Геодезическая съемка',
+            'reference': confirmed['reference'], 'due_date': '07.12.2026'}]
+        return json.dumps({'answer': context['expected_deadline_answer'],
+                           'references': [confirmed['reference']], 'insufficient': False})
+
+    monkeypatch.setattr(giga, 'chat', fake_chat)
+    response = client.post(base + '/chat', headers=headers, json={'text': question, 'use_ai': True})
+    assert response.status_code == 200
+    assert any(item['kind'] == 'document' and '05.12.2026' in item['text'] for item in observed)
+    accepted = [item for item in observed if item['kind'] == 'accepted']
+    assert [item['number'] for item in accepted] == [2]
+    assert '2026-12-07' in accepted[0]['text']
+    turn = response.json()
+    assert turn['used_ai'] is True
+    assert '07.12.2026' in turn['answer']
+    assert turn['citations'][0]['record_id'] == record['id']
+    assert turn['citations'][0]['number'] == 2
+
+    def wrong_chat(_system, payload, **_options):
+        reference = json.loads(payload)['confirmed_deadlines'][0]['reference']
+        return json.dumps({'answer': f'Текущий срок: 05.12.2026 [{reference}].',
+                           'references': [reference], 'insufficient': False})
+
+    monkeypatch.setattr(giga, 'chat', wrong_chat)
+    corrected = client.post(base + '/chat', headers=headers, json={'text': question, 'use_ai': True})
+    assert corrected.status_code == 200
+    assert corrected.json()['answer'] == turn['answer']
+    assert corrected.json()['used_ai'] is False
+    assert corrected.json()['citations'] == turn['citations']
+
+    hits = client.get(base + '/search', params={'q': question, 'semantic': False}).json()['items']
+    assert [item['kind'] for item in hits] == ['document']
+    history = client.post(base + '/chat', headers=headers, json={'text': question, 'mode': 'history'})
+    assert history.status_code == 200
+    assert [item['kind'] for item in history.json()['citations']] == ['document']
+
+    # An accepted revision may still cite a previous version of the document.
+    updated = upload_plan(original + '\nПриложение обновлено.',
+                          {'document_id': source['id'], 'expected_version': 1})
+    with db.SessionLocal() as session:
+        revision = session.scalar(select(Revision).where(Revision.record_id == record['id'], Revision.number == 2))
+        revision.evidence = [{'document_id': source['id'], 'version_id': source['version_id'],
+                              'locator': 'План', 'quote': original}]
+        session.commit()
+    for title in ('Разметка участка', 'Закупка труб', 'Отгрузка материалов'):
+        confirm_deadline('2026-11-30', title=title)
+
+    local = client.post(base + '/chat', headers=headers, json={'text': question})
+    assert local.status_code == 200
+    citations = local.json()['citations']
+    assert citations[0]['record_id'] == record['id']
+    assert any(item.get('version_id') == updated['version_id'] for item in citations)
+    assert len([item for item in citations if item['kind'] == 'accepted']) == 3
+
+
 def test_chat_purge_late_response_and_summary_dates(isolated, tmp_path, monkeypatch):
     import json
 

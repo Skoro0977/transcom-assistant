@@ -220,7 +220,48 @@ def embed_next():
     return True
 
 
-def retrieve(session, project_id, query, mode='current', start=None, end=None, basis='recorded', semantic=True, limit=10):
+def general_deadline_question(query):
+    words = set(re.findall(r'\w+', query.casefold()))
+    deadline_terms = ('срок', 'дедлайн')
+    general_terms = (*deadline_terms, 'како', 'каки', 'актуальн', 'текущ', 'поручен',
+                     'задач', 'проект', 'искусственн', 'пример', 'ближайш', 'предстоящ',
+                     'подскаж', 'покаж', 'назов', 'установлен', 'действующ', 'выполнен')
+    fillers = {'а', 'в', 'на', 'для', 'у', 'по', 'из', 'нас', 'как', 'данный', 'момент',
+               'же', 'сейчас', 'теперь', 'пожалуйста', 'работы', 'работе', 'работ'}
+    return any(word.startswith(deadline_terms) for word in words) and all(
+        word in fillers or word.startswith(general_terms) for word in words)
+
+
+def deadline_context(rows, ranked, by_id, scores, limit):
+    top = set(ranked[:limit])
+    matched_versions = {by_id[key].document_version_id for key in top} - {None}
+    matched_documents = {doc_id for chunk, _, _, doc_id in rows if doc_id and chunk.id in top}
+    selected = {}
+    for chunk, revision, kind, _ in rows:
+        if kind not in ('requirement', 'task', 'stage'):
+            continue
+        data = revision.data
+        due = data.get('due_date')
+        if (not due or data.get('status') == 'cancelled' or data.get('task_state') == 'done'
+                or data.get('stage_state') == 'approved' or due not in chunk.text.splitlines()):
+            continue
+        evidence = [e for e in revision.evidence if not e.get('removed')]
+        linked_version = any(e.get('version_id') in matched_versions for e in evidence)
+        linked_document = any(e.get('document_id') in matched_documents for e in evidence)
+        priority = (not linked_version, not linked_document, -scores.get(chunk.id, 0),
+                    due, revision.record_id, chunk.ordinal, chunk.id)
+        if revision.id not in selected or priority < selected[revision.id]:
+            selected[revision.id] = priority
+    # Reserve a few of the existing source slots for cards, leaving room for documents.
+    preferred = sorted(selected.values())[:min(3, max(1, limit // 2))]
+    preferred_keys = [item[-1] for item in preferred]
+    preferred_revisions = {by_id[key].revision_id for key in preferred_keys}
+    rest = [key for key in ranked if by_id[key].revision_id not in preferred_revisions]
+    return [*preferred_keys, *rest][:limit], set(preferred_keys)
+
+
+def retrieve(session, project_id, query, mode='current', start=None, end=None, basis='recorded',
+             semantic=True, limit=10, *, chat_deadlines=False):
     search = eligible_query(project_id, mode)
     if basis == 'source':
         if start:
@@ -243,7 +284,13 @@ def retrieve(session, project_id, query, mode='current', start=None, end=None, b
             vector = [x / norm for x in vector] if norm and math.isfinite(norm) else None
         except ProviderError as error:
             warning = str(error) + '. Доступен поиск по словам.'
-    chunks = list(session.scalars(search))
+    use_deadline_context = (chat_deadlines and mode == 'current' and not start and not end and limit > 0
+                            and general_deadline_question(query))
+    if use_deadline_context:
+        rows = list(session.execute(search.add_columns(Revision, Record.kind, DocumentVersion.document_id)))
+        chunks = [row[0] for row in rows]
+    else:
+        chunks = list(session.scalars(search))
     terms = {word[:6] for word in re.findall(r'\w{3,}', query.lower())}
     terms -= {'какие', 'когда', 'почему', 'этого', 'которы', 'проек', 'найди'}
     lexical, semantic_scores = [], []
@@ -268,7 +315,12 @@ def retrieve(session, project_id, query, mode='current', start=None, end=None, b
     if basis == 'source' and (start or end):
         warning += ' Источники без известной даты не входят в период.'
     by_id, items = {c.id: c for c in chunks}, []
-    for key in sorted(scores, key=scores.get, reverse=True)[:limit]:
+    ranked = sorted(scores, key=scores.get, reverse=True)
+    keys, deadline_keys = ranked[:limit], set()
+    if use_deadline_context:
+        keys, deadline_keys = deadline_context(rows, ranked, by_id, scores, limit)
+    confirmed_due_dates = {}
+    for key in keys:
         chunk = by_id[key]
         item = {'id': key, 'text': chunk.text, 'locator': chunk.locator, 'quoted': chunk.quoted,
                 'source_date': chunk.source_date, 'recorded_at': chunk.recorded_at}
@@ -280,8 +332,13 @@ def retrieve(session, project_id, query, mode='current', start=None, end=None, b
             revision = session.get(Revision, chunk.revision_id)
             item.update(kind='accepted', record_id=revision.record_id, number=revision.number,
                         title=revision.data['title'], evidence=revision.evidence)
+            if key in deadline_keys:
+                confirmed_due_dates[key] = revision.data['due_date']
         items.append(item)
-    return {'items': items, 'warning': warning.strip(), 'mode': mode, 'date_basis': basis}
+    result = {'items': items, 'warning': warning.strip(), 'mode': mode, 'date_basis': basis}
+    if confirmed_due_dates:
+        result['confirmed_due_dates'] = confirmed_due_dates
+    return result
 
 
 @router.get('/api/projects/{project_id}/search')
